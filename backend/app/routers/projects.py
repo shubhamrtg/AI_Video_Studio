@@ -1,10 +1,12 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 import uuid
 from typing import List
+import os
 from app.models.project import ProjectCreate, ProjectResponse, ProjectStatus, ShotResponse, ShotStatus
 from app.db.database import get_db
 from app.services.storyboard_service import storyboard_service
 from app.services.video_provider import video_provider
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -24,6 +26,8 @@ def get_project_shots(db, project_id: str) -> List[ShotResponse]:
             style=row["style"],
             continuity_notes=row["continuity_notes"],
             negative_prompt=row["negative_prompt"],
+            audio_requirements=row["audio_requirements"] if "audio_requirements" in row.keys() else "",
+            narration_text=row["narration_text"] if "narration_text" in row.keys() else "",
             status=ShotStatus(row["status"]),
             video_url=row["video_url"],
             error=row["error"]
@@ -36,14 +40,19 @@ def create_project(project_in: ProjectCreate, background_tasks: BackgroundTasks)
     
     with get_db() as db:
         db.execute(
-            "INSERT INTO projects (id, master_prompt, target_duration, aspect_ratio, status) VALUES (?, ?, ?, ?, ?)",
-            (project_id, project_in.master_prompt, project_in.target_duration, project_in.aspect_ratio, ProjectStatus.DRAFT.value)
+            """INSERT INTO projects (id, excel_id, video_idea, target_duration, aspect_ratio, visual_style, language, voice_style, target_platform, priority, status) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (project_id, project_in.excel_id, project_in.video_idea, project_in.target_duration, project_in.aspect_ratio, project_in.visual_style, project_in.language, project_in.voice_style, project_in.target_platform, project_in.priority, ProjectStatus.QUEUED.value)
         )
         db.commit()
     
-    def generate_storyboard_task(pid: str, prompt: str, duration: int):
+    def generate_storyboard_task(pid: str, idea: str, duration: int):
         try:
-            shots = storyboard_service.generate_storyboard(prompt, duration)
+            with get_db() as db:
+                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.STORYBOARDING.value, pid))
+                db.commit()
+
+            shots = storyboard_service.generate_storyboard(idea, duration)
             with get_db() as db:
                 for shot in shots:
                     shot_id = str(uuid.uuid4())
@@ -53,22 +62,24 @@ def create_project(project_in: ProjectCreate, background_tasks: BackgroundTasks)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (shot_id, pid, shot.shot_number, shot.duration, shot.description, shot.camera, shot.subject, shot.action, shot.lighting, shot.style, shot.continuity_notes, shot.negative_prompt, ShotStatus.PENDING.value)
                     )
-                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.STORYBOARD_READY.value, pid))
+                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.READY_FOR_REVIEW.value, pid))
                 db.commit()
         except Exception as e:
             with get_db() as db:
-                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.FAILED.value, pid))
+                db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, str(e), pid))
                 db.commit()
             print(f"Storyboard generation failed: {e}")
 
-    background_tasks.add_task(generate_storyboard_task, project_id, project_in.master_prompt, project_in.target_duration)
+    background_tasks.add_task(generate_storyboard_task, project_id, project_in.video_idea, project_in.target_duration)
     
     return ProjectResponse(
         id=project_id,
-        master_prompt=project_in.master_prompt,
+        excel_id=project_in.excel_id or "",
+        video_idea=project_in.video_idea,
         target_duration=project_in.target_duration,
         aspect_ratio=project_in.aspect_ratio,
-        status=ProjectStatus.DRAFT,
+        status=ProjectStatus.QUEUED,
+        created_at="just now", # Placeholder for the response
         shots=[]
     )
 
@@ -83,10 +94,15 @@ def get_project(project_id: str):
         
         return ProjectResponse(
             id=row["id"],
-            master_prompt=row["master_prompt"],
+            excel_id=row["excel_id"] or "",
+            video_idea=row["video_idea"],
             target_duration=row["target_duration"],
             aspect_ratio=row["aspect_ratio"],
             status=ProjectStatus(row["status"]),
+            script_text=row["script_text"],
+            final_video_url=row["final_video_url"],
+            error=row["error"],
+            created_at=row["created_at"],
             shots=shots
         )
 
@@ -101,35 +117,48 @@ def generate_shot(project_id: str, shot_id: str):
         db.execute("UPDATE shots SET status = ? WHERE id = ?", (ShotStatus.QUEUED.value, shot_id))
         db.commit()
     
-    # Construct a full prompt for Veo
     prompt = f"Description: {shot['description']}. Action: {shot['action']}. Camera: {shot['camera']}. Style: {shot['style']}. Lighting: {shot['lighting']}."
-    
-    # We will modify video_provider to accept shot_id instead of job_id, or just use job_id = shot_id
-    video_provider.generate_video_async(shot_id, prompt, shot["duration"])
+    aspect_ratio = project["aspect_ratio"]
+
+    video_provider.generate_video_async(project_id, shot_id, prompt, shot["duration"], aspect_ratio)
     
     return {"status": "QUEUED"}
-
-import os
-from app.core.config import settings
 
 @router.post("/{project_id}/assemble")
 def assemble_project(project_id: str):
     with get_db() as db:
+        project = db.execute("SELECT status FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.ASSEMBLING.value, project_id))
+        db.commit()
+
         shots = db.execute("SELECT video_url, status FROM shots WHERE project_id = ? ORDER BY shot_number ASC", (project_id,)).fetchall()
         
         shot_paths = []
         for shot in shots:
             if shot["status"] != ShotStatus.COMPLETED.value:
+                db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, "Not all shots completed", project_id))
+                db.commit()
                 raise HTTPException(status_code=400, detail="All shots must be COMPLETED before assembly")
+            
+            # Use safe local path parsing
             filename = shot["video_url"].split("/")[-1]
-            local_path = os.path.join(settings.DATA_DIR, "projects", "default", "shots", filename)
+            local_path = os.path.join(settings.DATA_DIR, "projects", project_id, "shots", filename)
+            if not os.path.exists(local_path):
+                db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, f"Missing shot file {filename}", project_id))
+                db.commit()
+                raise HTTPException(status_code=500, detail=f"Missing shot file: {filename}")
             shot_paths.append(local_path)
             
         from app.services.assembly_service import assembly_service
         try:
             final_url = assembly_service.assemble_shots(project_id, shot_paths)
-            db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.COMPLETED.value, project_id))
+            db.execute("UPDATE projects SET status = ?, final_video_url = ? WHERE id = ?", (ProjectStatus.COMPLETED.value, final_url, project_id))
             db.commit()
             return {"status": "COMPLETED", "final_video_url": final_url}
         except Exception as e:
+            db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, str(e), project_id))
+            db.commit()
             raise HTTPException(status_code=500, detail=str(e))

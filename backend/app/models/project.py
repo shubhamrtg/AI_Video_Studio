@@ -27,7 +27,7 @@ class ShotStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 class ProjectCreate(BaseModel):
-    excel_id: str
+    excel_id: Optional[str] = None
     video_idea: str
     target_duration: int
     aspect_ratio: str

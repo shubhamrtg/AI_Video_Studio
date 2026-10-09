@@ -12,8 +12,11 @@ logger = logging.getLogger(__name__)
 
 class ExcelService:
     def __init__(self):
-        self.filepath = settings.EXCEL_WORKBOOK_PATH
         self.sheet_name = "VideoIdeas"
+
+    @property
+    def filepath(self):
+        return settings.EXCEL_WORKBOOK_PATH
 
     def read_and_ingest(self):
         """Reads QUEUED rows from Excel and ingests them into the DB."""

@@ -3,17 +3,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
 
-from app.routers import generation, projects, orchestration
+from app.routers import projects, orchestration
 from app.db.database import init_db
 from app.core.config import settings
 
 app = FastAPI(title="AI Video Studio API")
 
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -21,7 +23,6 @@ app.add_middleware(
 def on_startup():
     init_db()
 
-app.include_router(generation.router, prefix="/api")
 app.include_router(projects.router, prefix="/api/projects")
 app.include_router(orchestration.router)
 

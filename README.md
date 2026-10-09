@@ -1,46 +1,94 @@
 # AI Video Studio
 
-AI Video Generation Application using Google's Gemini/Veo API.
-
-## Current Progress
-
-- **Stage 1 (Core Veo Pipeline):** Verified working! We can securely queue, generate, and fetch videos asynchronously.
-- **Stage 2 (Shot Generation):** We've built the backend routing to generate specific shots asynchronously via Veo.
-- **Stage 3 (Storyboard Generation):** We successfully use structured LLM outputs to automatically parse a master prompt into `N` individual shots mapping to Veo's generation duration limitations while maintaining visual continuity rules.
-- **Stage 4 (Regeneration):** The backend supports regenerating individual shots individually.
-- **Stage 5 (Interactive React UI):** Created a beautiful, fully functional React frontend using Vite, TailwindCSS (v4), and Lucide Icons that interfaces with the FastAPI backend.
-- **Stage 6 (Video Assembly):** We've integrated FFmpeg to losslessly concatenate approved shots into a single continuous sequence `final.mp4`.
+An end-to-end automated platform for generating videos from ideas in an Excel spreadsheet.
 
 ## Architecture
 
-- **Backend:** Python + FastAPI + SQLite
-- **Frontend:** React + TypeScript (Vite + TailwindCSS)
-- **AI Model:** `gemini-omni-1.1-flash` (Video) and `gemini-2.5-flash-lite` (Storyboard) via `google-genai` SDK.
+* **Backend:** FastAPI, SQLite, FFmpeg (for assembly)
+* **Frontend:** React + Vite
+* **AI Provider:** Google Gemini API (Veo)
 
-## Setup & Running
+## Features & Supported Lifecycle States
 
-### 1. Backend
-```bash
+The application orchestrates video projects through the following states:
+1. `QUEUED` - Ingested from Excel.
+2. `VALIDATING` - Checking requirements.
+3. `SCRIPTING` - Generating a text script.
+4. `STORYBOARDING` - Breaking the script into individual shots of exact duration.
+5. `PREPARING_REFERENCES` (Placeholder)
+6. `GENERATING_AUDIO` (Placeholder)
+7. `GENERATING_VIDEO` - Sending exact-length prompts to Veo (4-8s each).
+8. `ASSEMBLING` - Using FFmpeg to compile and transcode the generated shots.
+9. `VALIDATING_OUTPUT` - Verifying final artifact length and format.
+10. `READY_FOR_REVIEW` - Available in UI.
+11. `COMPLETED` - Approved and finalized.
+12. `FAILED` - Errored out at any stage.
+13. `CANCELLED`
+
+## Requirements
+
+* Python 3.12+
+* Node.js 18+
+* FFmpeg (must be installed and in the system `PATH`)
+
+## Setup
+
+1. **Clone and Setup Backend Environment:**
+   ```powershell
+   cd backend
+   python -m venv venv
+   .\venv\Scripts\Activate
+   pip install -r requirements.txt
+   ```
+
+2. **Configuration:**
+   Copy `backend/.env.example` to `backend/.env` and update it:
+   ```env
+   GEMINI_API_KEY=your_key_here
+   DATA_DIR=../data
+   VIDEO_MODEL=veo-3.1-generate-preview
+   EXCEL_WORKBOOK_PATH=../video_ideas.xlsx
+   ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+   ```
+   *Note: If you don't have a Veo-enabled Google Cloud billing account, leave the API key as is. The application provides graceful mocked fallback tests.*
+
+3. **Database Migrations:**
+   The database schema is initialized and migrated automatically upon starting the FastAPI application.
+
+## Excel Workflow
+
+1. Create a `video_ideas.xlsx` workbook in the root folder.
+2. Ensure there is a sheet named `VideoIdeas` with columns: `id`, `video_idea`, `target_duration_seconds`, `aspect_ratio`, `status`, `project_id`.
+3. Put `QUEUED` in the status column.
+4. Call `POST /api/orchestration/ingest` (or click Ingest in the UI) to load them.
+
+## Tests
+
+The repository now uses `pytest` with a dedicated, deterministic automated test suite.
+
+* **Unit and Mocked Pipeline Tests:**
+  Run the automated test suite without hitting real paid API limits:
+  ```powershell
+  cd backend
+  $env:PYTHONPATH = "d:\Antigravity_Projects\AI_Video_Studio\backend"
+  pytest tests/
+  ```
+  *(These tests use a temporary isolated database and temporary mock Excel sheets.)*
+
+* **Real Provider Integration Test (Optional):**
+  If you have an active API key and FFmpeg installed, you can trigger an end-to-end run by starting the backend and hitting the endpoint manually or via the frontend UI.
+
+## Running the Application
+
+**Start Backend:**
+```powershell
 cd backend
-python -m venv venv
-.\venv\Scripts\activate
-pip install -r requirements.txt
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8001
 ```
 
-### 2. Frontend
-```bash
+**Start Frontend:**
+```powershell
 cd frontend
 npm install
 npm run dev
 ```
-
-### 3. Usage
-Navigate to `http://localhost:5173/` in your browser.
-Enter your Master Prompt, select a Target Duration, and click **Generate Storyboard**.
-The AI will generate the storyboard shots. You can then **Generate** or **Regenerate** individual shots.
-Once all shots are COMPLETED, click **Assemble Final Video**.
-
-## Known Limitations
-- The Veo API generation queue is often heavily loaded, which may result in longer queue times for individual shots.
-- `gemini-3.5` models are currently experiencing high quota demand; `gemini-2.5-flash-lite` is actively used for storyboard generation as a fallback.

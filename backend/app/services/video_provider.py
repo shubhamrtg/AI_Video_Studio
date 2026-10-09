@@ -4,54 +4,63 @@ import urllib.request
 import os
 from google import genai
 from google.genai import types
-from app.models.job import JobStatus
+from app.models.project import ShotStatus
 from app.db.database import get_db
 from app.core.config import settings
+import logging
 
-def update_job_status(job_id: str, status: JobStatus, video_url: str = None, error: str = None):
+logger = logging.getLogger(__name__)
+
+def update_shot_status(shot_id: str, status: ShotStatus, video_url: str = None, error: str = None):
     with get_db() as db:
         db.execute(
             "UPDATE shots SET status = ?, video_url = ?, error = ? WHERE id = ?",
-            (status.value, video_url, error, job_id)
-        )
-        # also update jobs table for backwards compatibility in Stage 1 test
-        db.execute(
-            "UPDATE jobs SET status = ?, video_url = ?, error = ? WHERE id = ?",
-            (status.value, video_url, error, job_id)
+            (status.value, video_url, error, shot_id)
         )
         db.commit()
 
 class GoogleVeoProvider:
     def __init__(self):
-        self.client = genai.Client(api_key=settings.GEMINI_API_KEY, http_options={"timeout": 600000})
+        # Allow running tests without crashing on missing API key
+        api_key = settings.GEMINI_API_KEY if settings.GEMINI_API_KEY else "dummy_key"
+        self.client = genai.Client(api_key=api_key, http_options={"timeout": 600000})
         self.model = settings.VIDEO_MODEL
 
-    def generate_video_async(self, job_id: str, prompt: str, duration: int = 5):
+    def generate_video_async(self, project_id: str, shot_id: str, prompt: str, duration: int, aspect_ratio: str = "16:9"):
         def task():
             try:
-                update_job_status(job_id, JobStatus.GENERATING)
+                update_shot_status(shot_id, ShotStatus.GENERATING)
                 
-                print(f"[{job_id}] Calling Veo API with models.generate_videos...")
+                logger.info(f"[{shot_id}] Calling Veo API with models.generate_videos...")
                 import time
                 
+                # Veo requires duration_seconds between 4 and 8 inclusive.
+                veo_duration = max(4, min(duration, 8))
+                
+                # Veo only explicitly supports "16:9" or "9:16", default 16:9
+                veo_ar = aspect_ratio if aspect_ratio in ["16:9", "9:16"] else "16:9"
+
+                if settings.GEMINI_API_KEY == "" or settings.GEMINI_API_KEY == "dummy_key":
+                    raise ValueError("GEMINI_API_KEY is not configured.")
+
                 operation = self.client.models.generate_videos(
                     model=self.model,
                     source=types.GenerateVideosSource(prompt=prompt),
                     config=types.GenerateVideosConfig(
                         number_of_videos=1,
-                        duration_seconds=4,
-                        aspect_ratio="16:9"
+                        duration_seconds=veo_duration,
+                        aspect_ratio=veo_ar
                     )
                 )
                 
-                print(f"[{job_id}] Operation started: {operation.name}. Polling...")
+                logger.info(f"[{shot_id}] Operation started: {operation.name}. Polling...")
                 
                 while not operation.done:
                     time.sleep(10)
                     operation = self.client.operations.get(operation=operation.name)
-                    print(f"[{job_id}] Polling... done={operation.done}")
+                    logger.info(f"[{shot_id}] Polling... done={operation.done}")
                 
-                print(f"[{job_id}] Operation complete.")
+                logger.info(f"[{shot_id}] Operation complete.")
                 
                 if operation.error:
                     raise RuntimeError(f"Operation failed: {operation.error.message}")
@@ -61,27 +70,24 @@ class GoogleVeoProvider:
                     
                 video = operation.response.generated_videos[0].video
                 
-                # Download the video
-                project_dir = os.path.join(settings.DATA_DIR, "projects", "default", "shots")
+                project_dir = os.path.join(settings.DATA_DIR, "projects", project_id, "shots")
                 os.makedirs(project_dir, exist_ok=True)
-                local_path = os.path.join(project_dir, f"{job_id}.mp4")
+                local_path = os.path.join(project_dir, f"{shot_id}.mp4")
                 
                 if video.video_bytes:
-                    print(f"[{job_id}] Writing bytes to {local_path}...")
                     with open(local_path, "wb") as f:
                         f.write(video.video_bytes)
                 elif video.uri:
-                    print(f"[{job_id}] Downloading URI {video.uri} to {local_path}...")
                     urllib.request.urlretrieve(video.uri, local_path)
                 else:
                     raise RuntimeError("No video bytes or URI returned")
                 
-                video_url = f"/videos/{job_id}.mp4"
-                update_job_status(job_id, JobStatus.COMPLETED, video_url=video_url)
+                video_url = f"/projects/{project_id}/shots/{shot_id}.mp4"
+                update_shot_status(shot_id, ShotStatus.COMPLETED, video_url=video_url)
                 
             except Exception as e:
-                print(f"[{job_id}] Error: {str(e)}")
-                update_job_status(job_id, JobStatus.FAILED, error=str(e))
+                logger.error(f"[{shot_id}] Error: {str(e)}")
+                update_shot_status(shot_id, ShotStatus.FAILED, error=str(e))
                 
         thread = threading.Thread(target=task)
         thread.start()
