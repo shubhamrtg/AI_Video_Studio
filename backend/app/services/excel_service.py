@@ -29,16 +29,19 @@ class ExcelService:
                 return
 
             try:
-                wb = openpyxl.load_workbook(self.filepath, data_only=True)
-                if self.sheet_name not in wb.sheetnames:
+                wb_data = openpyxl.load_workbook(self.filepath, data_only=True)
+                if self.sheet_name not in wb_data.sheetnames:
                     logger.error(f"Sheet {self.sheet_name} not found in workbook")
                     return
+                ws_data = wb_data[self.sheet_name]
                 
-                ws = wb[self.sheet_name]
+                # Load a separate writable workbook to preserve formulas
+                wb_write = openpyxl.load_workbook(self.filepath)
+                ws_write = wb_write[self.sheet_name]
                 
                 # Map column names to indices
                 headers = {}
-                for col_idx, cell in enumerate(ws[1], 1):
+                for col_idx, cell in enumerate(ws_data[1], 1):
                     if cell.value:
                         headers[cell.value] = col_idx
                         
@@ -51,10 +54,10 @@ class ExcelService:
                 rows_ingested = 0
                 
                 with get_db() as db:
-                    for row_idx in range(2, ws.max_row + 1):
-                        status_val = ws.cell(row=row_idx, column=headers["status"]).value
+                    for row_idx in range(2, ws_data.max_row + 1):
+                        status_val = ws_data.cell(row=row_idx, column=headers["status"]).value
                         if status_val == "QUEUED":
-                            excel_id = str(ws.cell(row=row_idx, column=headers["id"]).value)
+                            excel_id = str(ws_data.cell(row=row_idx, column=headers["id"]).value)
                             
                             # Check if already exists
                             existing = db.execute("SELECT id FROM projects WHERE excel_id = ?", (excel_id,)).fetchone()
@@ -64,15 +67,15 @@ class ExcelService:
                             try:
                                 project_data = ProjectCreate(
                                     excel_id=excel_id,
-                                    video_idea=str(ws.cell(row=row_idx, column=headers["video_idea"]).value),
-                                    target_duration=int(ws.cell(row=row_idx, column=headers["target_duration_seconds"]).value or 30),
-                                    aspect_ratio=str(ws.cell(row=row_idx, column=headers["aspect_ratio"]).value or "16:9"),
-                                    audio_policy=str(ws.cell(row=row_idx, column=headers["audio_policy"]).value or "silent").lower() if "audio_policy" in headers else "silent",
-                                    visual_style=ws.cell(row=row_idx, column=headers.get("visual_style", -1)).value if "visual_style" in headers else None,
-                                    language=ws.cell(row=row_idx, column=headers.get("language", -1)).value if "language" in headers else "English",
-                                    voice_style=ws.cell(row=row_idx, column=headers.get("voice_style", -1)).value if "voice_style" in headers else None,
-                                    target_platform=ws.cell(row=row_idx, column=headers.get("target_platform", -1)).value if "target_platform" in headers else None,
-                                    priority=ws.cell(row=row_idx, column=headers.get("priority", -1)).value if "priority" in headers else "Normal"
+                                    video_idea=str(ws_data.cell(row=row_idx, column=headers["video_idea"]).value),
+                                    target_duration=int(ws_data.cell(row=row_idx, column=headers["target_duration_seconds"]).value or 30),
+                                    aspect_ratio=str(ws_data.cell(row=row_idx, column=headers["aspect_ratio"]).value or "16:9"),
+                                    audio_policy=str(ws_data.cell(row=row_idx, column=headers["audio_policy"]).value or "silent").lower() if "audio_policy" in headers else "silent",
+                                    visual_style=ws_data.cell(row=row_idx, column=headers.get("visual_style", -1)).value if "visual_style" in headers else None,
+                                    language=ws_data.cell(row=row_idx, column=headers.get("language", -1)).value if "language" in headers else "English",
+                                    voice_style=ws_data.cell(row=row_idx, column=headers.get("voice_style", -1)).value if "voice_style" in headers else None,
+                                    target_platform=ws_data.cell(row=row_idx, column=headers.get("target_platform", -1)).value if "target_platform" in headers else None,
+                                    priority=ws_data.cell(row=row_idx, column=headers.get("priority", -1)).value if "priority" in headers else "Normal"
                                 )
                                 
                                 project_id = str(uuid.uuid4())
@@ -93,7 +96,7 @@ class ExcelService:
                                 
                                 # Write back the internal project_id
                                 if "project_id" in headers:
-                                    ws.cell(row=row_idx, column=headers["project_id"]).value = project_id
+                                    ws_write.cell(row=row_idx, column=headers["project_id"]).value = project_id
                                     
                                 db.commit()
                                 rows_ingested += 1
@@ -102,16 +105,22 @@ class ExcelService:
                             except (ValueError, ValidationError) as e:
                                 logger.error(f"Validation error on row {row_idx}: {e}")
                                 if "error_message" in headers:
-                                    ws.cell(row=row_idx, column=headers["error_message"]).value = str(e)
-                                ws.cell(row=row_idx, column=headers["status"]).value = "VALIDATION_FAILED"
+                                    ws_write.cell(row=row_idx, column=headers["error_message"]).value = str(e)
+                                ws_write.cell(row=row_idx, column=headers["status"]).value = "VALIDATION_FAILED"
                 
-                if rows_ingested > 0 or "VALIDATION_FAILED" in [ws.cell(row=i, column=headers["status"]).value for i in range(2, ws.max_row+1)]:
-                    # Try saving safely
+                if rows_ingested > 0 or "VALIDATION_FAILED" in [ws_write.cell(row=i, column=headers["status"]).value for i in range(2, ws_data.max_row+1)]:
                     try:
-                        wb.save(self.filepath)
+                        temp_path = self.filepath + ".tmp"
+                        wb_write.save(temp_path)
+                        os.replace(temp_path, self.filepath)
                         logger.info(f"Ingested {rows_ingested} new ideas.")
                     except PermissionError:
                         logger.error("Could not save Excel. Close the file if open.")
+                        if os.path.exists(temp_path):
+                            try:
+                                os.remove(temp_path)
+                            except OSError:
+                                pass
                         
             except Exception as e:
                 logger.error(f"Failed to ingest Excel: {e}")
@@ -158,9 +167,16 @@ class ExcelService:
                             ws.cell(row=row_idx, column=headers["completed_at"]).value = datetime.now().isoformat()
                             
                         try:
-                            wb.save(self.filepath)
+                            temp_path = self.filepath + ".tmp"
+                            wb.save(temp_path)
+                            os.replace(temp_path, self.filepath)
                         except PermissionError:
                             logger.error("Could not save Excel. File is locked.")
+                            if os.path.exists(temp_path):
+                                try:
+                                    os.remove(temp_path)
+                                except OSError:
+                                    pass
                         break
             except Exception as e:
                 logger.error(f"Failed to update Excel status: {e}")

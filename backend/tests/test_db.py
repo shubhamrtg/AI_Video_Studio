@@ -79,3 +79,27 @@ def test_data_preservation_and_migrations(tmp_path):
     with sqlite3.connect(db_path) as conn:
         version = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
         assert version == 3
+
+def test_foreign_key_enforcement(tmp_path, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    from app.db.database import init_db, get_db
+    init_db()
+
+    with get_db() as db:
+        # Try inserting a shot for a non-existent project
+        import sqlite3
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("INSERT INTO shots (id, project_id, shot_number, duration, description, camera, subject, action, lighting, style, continuity_notes, status) VALUES ('s1', 'nonexistent_project', 1, 5, 'desc', 'cam', 'subj', 'act', 'light', 'style', 'notes', 'PENDING')")
+            db.commit()
+            
+        # Insert a valid project
+        db.execute("INSERT INTO projects (id, video_idea, target_duration, aspect_ratio, status) VALUES ('p1', 'Idea', 30, '16:9', 'QUEUED')")
+        # Insert a valid shot
+        db.execute("INSERT INTO shots (id, project_id, shot_number, duration, description, camera, subject, action, lighting, style, continuity_notes, status) VALUES ('s1', 'p1', 1, 5, 'desc', 'cam', 'subj', 'act', 'light', 'style', 'notes', 'PENDING')")
+        
+        # Try deleting the project - should fail because ON DELETE CASCADE is not defined, 
+        # so it restricts deletion of a referenced row
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("DELETE FROM projects WHERE id = 'p1'")
+            db.commit()

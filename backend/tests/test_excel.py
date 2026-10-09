@@ -17,6 +17,7 @@ def test_excel_ingestion(test_client, monkeypatch):
     ws.append(headers)
     ws.append(["EX-01", "Cat riding a roomba", 10, "16:9", "QUEUED", ""])
     ws.append(["EX-02", "Dog playing piano", 5, "9:16", "COMPLETED", ""])
+    ws.append(["=SUM(1,2)", "Formula test", 5, "9:16", "COMPLETED", ""])
     wb.save(temp_excel)
     
     # Override settings
@@ -54,8 +55,11 @@ def test_excel_ingestion(test_client, monkeypatch):
     ws_read.append(["EX-03", "", "invalid", "16:9", "QUEUED", ""]) # Invalid duration, empty idea
     wb_read.save(temp_excel)
     excel_service.read_and_ingest()
+    # Read back to verify formulas were not destroyed
     wb_read2 = openpyxl.load_workbook(temp_excel)
     ws_read2 = wb_read2["VideoIdeas"]
-    assert ws_read2.cell(row=4, column=5).value == "VALIDATION_FAILED"
+    assert ws_read2.cell(row=5, column=5).value == "VALIDATION_FAILED"
+    # Ensure our formula survived!
+    assert ws_read2.cell(row=4, column=1).value == "=SUM(1,2)"
     
     os.remove(temp_excel)

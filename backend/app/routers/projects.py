@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from datetime import datetime, timezone
 import uuid
 from typing import List
@@ -92,7 +92,7 @@ def get_project(project_id: str):
         )
 
 @router.post("/{project_id}/shots/{shot_id}/generate")
-def generate_shot(project_id: str, shot_id: str):
+def generate_shot(project_id: str, shot_id: str, background_tasks: BackgroundTasks):
     with get_db() as db:
         shot = db.execute("SELECT * FROM shots WHERE id = ? AND project_id = ?", (shot_id, project_id)).fetchone()
         if not shot:
@@ -105,7 +105,15 @@ def generate_shot(project_id: str, shot_id: str):
     prompt = f"Description: {shot['description']}. Action: {shot['action']}. Camera: {shot['camera']}. Style: {shot['style']}. Lighting: {shot['lighting']}."
     aspect_ratio = project["aspect_ratio"]
 
-    video_provider.generate_video_async(project_id, shot_id, prompt, shot["duration"], aspect_ratio)
+    def background_generate():
+        try:
+            from app.services.video_provider import video_provider
+            video_provider.generate_video_sync(project_id, shot_id, prompt, shot["duration"], aspect_ratio)
+        except Exception as e:
+            # Generate video sync handles db updates on failure, but we log here just in case
+            print(f"Background shot generation failed: {e}")
+
+    background_tasks.add_task(background_generate)
     
     return {"status": "QUEUED"}
 
@@ -145,15 +153,29 @@ def assemble_project(project_id: str):
         try:
             target_dur = project["target_duration"]
             aspect = project["aspect_ratio"]
-            final_url = assembly_service.assemble_shots(project_id, shot_paths, target_dur, aspect)
-            db.execute("UPDATE projects SET status = ?, final_video_url = ? WHERE id = ?", (ProjectStatus.COMPLETED.value, final_url, project_id))
+            
+            # (Note: we don't have audio policy in the small SELECT earlier, let's grab it)
+            proj_full = db.execute("SELECT excel_id, audio_policy FROM projects WHERE id = ?", (project_id,)).fetchone()
+            audio_policy = proj_full["audio_policy"] if proj_full and "audio_policy" in proj_full.keys() else "silent"
+            
+            final_url = assembly_service.assemble_shots(project_id, shot_paths, target_dur, aspect, audio_policy)
+            
+            # Validation success
+            db.execute("UPDATE projects SET status = ?, final_video_url = ? WHERE id = ?", (ProjectStatus.VALIDATING_OUTPUT.value, final_url, project_id))
             db.commit()
             
-            # Also update excel if we have it
-            from app.services.excel_service import excel_service
-            proj_full = db.execute("SELECT excel_id FROM projects WHERE id = ?", (project_id,)).fetchone()
+            db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.READY_FOR_REVIEW.value, project_id))
+            db.commit()
+            
+            db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.COMPLETED.value, project_id))
+            db.commit()
+            
             if proj_full and proj_full["excel_id"]:
-                excel_service.update_excel_status(proj_full["excel_id"], "COMPLETED", final_url)
+                try:
+                    excel_service.update_excel_status(proj_full["excel_id"], "COMPLETED", final_url)
+                except Exception as sync_e:
+                    db.execute("UPDATE projects SET error = ? WHERE id = ?", (f"Sync failed: {sync_e}", project_id))
+                    db.commit()
                 
             return {"status": "COMPLETED", "final_video_url": final_url}
         except Exception as e:
@@ -163,6 +185,9 @@ def assemble_project(project_id: str):
             proj_full = db.execute("SELECT excel_id FROM projects WHERE id = ?", (project_id,)).fetchone()
             if proj_full and proj_full["excel_id"]:
                 from app.services.excel_service import excel_service
-                excel_service.update_excel_status(proj_full["excel_id"], "FAILED", error=str(e))
+                try:
+                    excel_service.update_excel_status(proj_full["excel_id"], "FAILED", error=str(e))
+                except Exception:
+                    pass
                 
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail="Assembly or validation failed.")

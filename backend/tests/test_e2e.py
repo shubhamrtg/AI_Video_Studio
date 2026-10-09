@@ -74,3 +74,55 @@ def test_full_e2e_workflow(test_client, tmp_path, monkeypatch):
     wb_read = openpyxl.load_workbook(temp_excel)
     ws_read = wb_read["VideoIdeas"]
     assert ws_read.cell(row=2, column=5).value == "COMPLETED"
+
+def test_atomic_claim_concurrency(test_client, monkeypatch):
+    """
+    Tests that if two threads attempt to run the pipeline for the same project, 
+    only one acquires the claim.
+    """
+    import threading
+    from app.services.orchestration_service import orchestration_service
+    from app.db.database import get_db
+    import uuid
+    
+    project_id = str(uuid.uuid4())
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO projects (id, video_idea, target_duration, aspect_ratio, status) VALUES (?, ?, ?, ?, ?)",
+            (project_id, "Concurrency test", 10, "16:9", "QUEUED")
+        )
+        db.commit()
+        
+    execution_count = [0]
+    lock = threading.Lock()
+    
+    # We patch run_pipeline_sync just at the point where it does actual work,
+    # or we can mock generate_storyboard. Let's mock generate_storyboard.
+    from app.services.storyboard_service import storyboard_service
+    original_generate = storyboard_service.generate_storyboard
+    
+    def mock_generate(*args, **kwargs):
+        with lock:
+            execution_count[0] += 1
+        return original_generate(*args, **kwargs)
+        
+    monkeypatch.setattr(storyboard_service, "generate_storyboard", mock_generate)
+    
+    # Mock video_provider and assembly_service to avoid real FFmpeg
+    from app.services.video_provider import video_provider
+    from app.services.assembly_service import assembly_service
+    monkeypatch.setattr(video_provider, "generate_video_sync", lambda *args, **kwargs: "/mock.mp4")
+    monkeypatch.setattr(assembly_service, "assemble_shots", lambda *args, **kwargs: "/final.mp4")
+
+    # Run 5 threads trying to execute the pipeline for the same project
+    threads = []
+    for _ in range(5):
+        t = threading.Thread(target=orchestration_service.run_pipeline_sync, args=(project_id,))
+        threads.append(t)
+        t.start()
+        
+    for t in threads:
+        t.join()
+        
+    # Only 1 execution should have happened!
+    assert execution_count[0] == 1

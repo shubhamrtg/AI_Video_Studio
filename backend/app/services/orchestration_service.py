@@ -9,20 +9,36 @@ from app.services.assembly_service import assembly_service
 from app.services.excel_service import excel_service
 from app.core.config import settings
 
+import threading
+
 logger = logging.getLogger(__name__)
 
 class OrchestrationService:
     def __init__(self):
-        # Bound concurrent generation jobs
         self.max_workers = 3
         self.max_queue = 10
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
+        
+        # Explicit admission control variables
+        self._queue_lock = threading.Lock()
+        self._active_and_queued_jobs = 0
 
     def trigger_pipeline(self, project_id: str):
         """Asynchronously start the pipeline. Rejects if queue is full."""
-        if self.executor._work_queue.qsize() >= self.max_queue:
-            raise RuntimeError(f"Orchestration queue is at capacity ({self.max_queue}). Try again later.")
-        self.executor.submit(self.run_pipeline_sync, project_id)
+        with self._queue_lock:
+            if self._active_and_queued_jobs >= self.max_queue:
+                raise RuntimeError(f"Orchestration queue is at capacity ({self.max_queue}). Try again later.")
+            self._active_and_queued_jobs += 1
+            
+        self.executor.submit(self._run_pipeline_wrapper, project_id)
+        
+    def _run_pipeline_wrapper(self, project_id: str):
+        """Wraps the actual pipeline to ensure capacity is released."""
+        try:
+            self.run_pipeline_sync(project_id)
+        finally:
+            with self._queue_lock:
+                self._active_and_queued_jobs -= 1
 
     def run_pipeline_sync(self, project_id: str):
         """
@@ -36,23 +52,26 @@ class OrchestrationService:
         """
         try:
             with get_db() as db:
-                project = db.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-                if not project:
+                # Atomic Claim
+                # We claim it if it's QUEUED (or FAILED if we allow retries, but for safety let's just do QUEUED for now)
+                cursor = db.execute("""
+                    UPDATE projects 
+                    SET status = ? 
+                    WHERE id = ? AND status IN (?, ?)
+                """, (ProjectStatus.STORYBOARDING.value, project_id, ProjectStatus.QUEUED.value, ProjectStatus.FAILED.value))
+                
+                if cursor.rowcount == 0:
+                    logger.warning(f"Project {project_id} could not be claimed (already running, completed, or not found).")
                     return
                 
-                # Protect against duplicate running
-                if project["status"] in [ProjectStatus.STORYBOARDING.value, ProjectStatus.GENERATING_VIDEO.value, ProjectStatus.ASSEMBLING.value]:
-                    logger.warning(f"Project {project_id} is already in progress.")
-                    return
-                    
+                db.commit()
+                project = db.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+                
                 excel_id = project["excel_id"]
                 video_idea = project["video_idea"]
                 target_dur = project["target_duration"]
                 aspect = project["aspect_ratio"]
                 audio_policy = project["audio_policy"] if "audio_policy" in project.keys() else "silent"
-
-                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.STORYBOARDING.value, project_id))
-                db.commit()
 
             # 2. Storyboarding
             shots = storyboard_service.generate_storyboard(video_idea, target_dur)
@@ -97,13 +116,28 @@ class OrchestrationService:
                 audio_mode=audio_policy
             )
             
-            # 5. Complete
+            # 5. Validation and Review
             with get_db() as db:
-                db.execute("UPDATE projects SET status = ?, final_video_url = ? WHERE id = ?", (ProjectStatus.COMPLETED.value, final_url, project_id))
+                db.execute("UPDATE projects SET status = ?, final_video_url = ? WHERE id = ?", (ProjectStatus.VALIDATING_OUTPUT.value, final_url, project_id))
+                db.commit()
+                # (Validation happened during assembly_shots successfully)
+                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.READY_FOR_REVIEW.value, project_id))
+                db.commit()
+            
+            # 6. Complete and Sync
+            with get_db() as db:
+                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.COMPLETED.value, project_id))
                 db.commit()
                 
             if excel_id:
-                excel_service.update_excel_status(excel_id, ProjectStatus.COMPLETED.value, final_url)
+                try:
+                    excel_service.update_excel_status(excel_id, ProjectStatus.COMPLETED.value, final_url)
+                except Exception as sync_e:
+                    logger.error(f"Media succeeded but Excel sync failed: {sync_e}")
+                    with get_db() as db:
+                        db.execute("UPDATE projects SET error = ? WHERE id = ?", (f"Sync failed: {sync_e}", project_id))
+                        db.commit()
+                    # Do NOT fail the project since media generation succeeded.
 
         except Exception as e:
             logger.error(f"Pipeline failed for {project_id}: {str(e)}")
