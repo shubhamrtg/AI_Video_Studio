@@ -33,6 +33,12 @@ def test_excel_ingestion(test_client, monkeypatch):
         assert len(projects) == 1
         assert projects[0]["video_idea"] == "Cat riding a roomba"
     
+    # Test duplicate ingestion (idempotent)
+    excel_service.read_and_ingest()
+    with get_db() as db:
+        projects = db.execute("SELECT * FROM projects WHERE excel_id = 'EX-01'").fetchall()
+        assert len(projects) == 1 # Still 1
+        
     # Update status
     excel_service.update_excel_status("EX-01", "COMPLETED")
     
@@ -40,5 +46,13 @@ def test_excel_ingestion(test_client, monkeypatch):
     wb_read = openpyxl.load_workbook(temp_excel)
     ws_read = wb_read["VideoIdeas"]
     assert ws_read.cell(row=2, column=5).value == "COMPLETED"
+    
+    # Negative test: invalid row
+    ws_read.append(["EX-03", "", "invalid", "16:9", "QUEUED", ""]) # Invalid duration, empty idea
+    wb_read.save(temp_excel)
+    excel_service.read_and_ingest()
+    wb_read2 = openpyxl.load_workbook(temp_excel)
+    ws_read2 = wb_read2["VideoIdeas"]
+    assert ws_read2.cell(row=4, column=5).value == "VALIDATION_FAILED"
     
     os.remove(temp_excel)

@@ -37,11 +37,79 @@ class StoryboardService:
         
         if settings.GEMINI_API_KEY == "" or settings.GEMINI_API_KEY == "dummy_key":
             logger.warning("GEMINI_API_KEY is not configured. Returning dummy storyboard for testing.")
-            return [
+            return self._generate_dummy_storyboard(target_duration)
+            
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=[system_instruction, f"Video Idea: {video_idea}"],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=list[ShotBase],
+                    temperature=0.7 + (attempt * 0.1) # Increase temp slightly on retries
+                )
+            )
+            
+            try:
+                shots_data = json.loads(response.text)
+                shots = [ShotBase(**shot) for shot in shots_data]
+                
+                # Validation
+                if not shots:
+                    raise ValueError("Storyboard must contain at least one shot.")
+                
+                total_duration = sum(s.duration for s in shots)
+                
+                # Check individual lengths
+                for i, s in enumerate(shots):
+                    s.shot_number = i + 1
+                    if s.duration < 4 or s.duration > 8:
+                        raise ValueError(f"Shot {s.shot_number} has invalid duration {s.duration}s. Must be 4-8s.")
+                
+                # Check total
+                if target_duration >= 4 and total_duration != target_duration:
+                    raise ValueError(f"Total duration {total_duration}s does not match target {target_duration}s.")
+                    
+                return shots
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
+                last_error = e
+                
+        raise ValueError(f"Failed to generate valid storyboard after {max_retries} attempts. Last error: {str(last_error)}")
+
+    def _generate_dummy_storyboard(self, target_duration: int) -> List[ShotBase]:
+        shots = []
+        remaining = max(4, target_duration)
+        shot_num = 1
+        
+        while remaining > 0:
+            if remaining > 8:
+                if remaining - 8 >= 4:
+                    duration = 8
+                else:
+                    duration = remaining - 4
+            else:
+                duration = remaining
+                
+            # Failsafe for unrepresentable combinations (e.g. 11 = 6 + 5) handled greedily.
+            # If duration < 4 here, we have a math issue, but dummy is simple:
+            if duration < 4:
+                # Steal from previous if possible (e.g. remaining=2, previous=8 -> 5 and 5)
+                if shots and shots[-1].duration > 4:
+                    needed = 4 - duration
+                    shots[-1].duration -= needed
+                    duration = 4
+                else:
+                    duration = 4
+                    
+            shots.append(
                 ShotBase(
-                    shot_number=1,
-                    duration=target_duration,
-                    description="Dummy shot",
+                    shot_number=shot_num,
+                    duration=duration,
+                    description=f"Dummy shot {shot_num}",
                     camera="Static",
                     subject="Dummy subject",
                     action="Dummy action",
@@ -49,30 +117,10 @@ class StoryboardService:
                     style="Cinematic",
                     continuity_notes="None"
                 )
-            ]
-            
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=[system_instruction, f"Video Idea: {video_idea}"],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=list[ShotBase],
-                temperature=0.7
             )
-        )
-        
-        try:
-            shots_data = json.loads(response.text)
-            shots = [ShotBase(**shot) for shot in shots_data]
+            remaining -= duration
+            shot_num += 1
             
-            # Validation
-            total_duration = sum(s.duration for s in shots)
-            if target_duration >= 4 and total_duration != target_duration:
-                logger.warning(f"LLM returned storyboard with total duration {total_duration}s instead of {target_duration}s")
-                # We could retry here, but we will accept the LLM's best effort to avoid infinite loops
-                
-            return shots
-        except Exception as e:
-            raise ValueError(f"Failed to parse storyboard JSON: {str(e)}\nResponse: {response.text}")
+        return shots
 
 storyboard_service = StoryboardService()

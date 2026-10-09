@@ -1,4 +1,3 @@
-import uuid
 import threading
 import urllib.request
 import os
@@ -55,7 +54,12 @@ class GoogleVeoProvider:
                 
                 logger.info(f"[{shot_id}] Operation started: {operation.name}. Polling...")
                 
+                start_time = time.time()
+                timeout = 3600 # 1 hour timeout
+                
                 while not operation.done:
+                    if time.time() - start_time > timeout:
+                        raise RuntimeError("Polling timed out after 1 hour.")
                     time.sleep(10)
                     operation = self.client.operations.get(operation=operation.name)
                     logger.info(f"[{shot_id}] Polling... done={operation.done}")

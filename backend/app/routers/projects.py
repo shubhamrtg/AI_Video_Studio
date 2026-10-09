@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
+from datetime import datetime, timezone
 import uuid
 from typing import List
 import os
@@ -79,7 +80,7 @@ def create_project(project_in: ProjectCreate, background_tasks: BackgroundTasks)
         target_duration=project_in.target_duration,
         aspect_ratio=project_in.aspect_ratio,
         status=ProjectStatus.QUEUED,
-        created_at="just now", # Placeholder for the response
+        created_at=datetime.now(timezone.utc).isoformat(),
         shots=[]
     )
 
@@ -127,7 +128,7 @@ def generate_shot(project_id: str, shot_id: str):
 @router.post("/{project_id}/assemble")
 def assemble_project(project_id: str):
     with get_db() as db:
-        project = db.execute("SELECT status FROM projects WHERE id = ?", (project_id,)).fetchone()
+        project = db.execute("SELECT status, target_duration, aspect_ratio FROM projects WHERE id = ?", (project_id,)).fetchone()
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -135,7 +136,11 @@ def assemble_project(project_id: str):
         db.commit()
 
         shots = db.execute("SELECT video_url, status FROM shots WHERE project_id = ? ORDER BY shot_number ASC", (project_id,)).fetchall()
-        
+        if not shots:
+            db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, "No shots found to assemble", project_id))
+            db.commit()
+            raise HTTPException(status_code=400, detail="Cannot assemble project with zero shots.")
+            
         shot_paths = []
         for shot in shots:
             if shot["status"] != ShotStatus.COMPLETED.value:
@@ -154,11 +159,26 @@ def assemble_project(project_id: str):
             
         from app.services.assembly_service import assembly_service
         try:
-            final_url = assembly_service.assemble_shots(project_id, shot_paths)
+            target_dur = project["target_duration"]
+            aspect = project["aspect_ratio"]
+            final_url = assembly_service.assemble_shots(project_id, shot_paths, target_dur, aspect)
             db.execute("UPDATE projects SET status = ?, final_video_url = ? WHERE id = ?", (ProjectStatus.COMPLETED.value, final_url, project_id))
             db.commit()
+            
+            # Also update excel if we have it
+            from app.services.excel_service import excel_service
+            proj_full = db.execute("SELECT excel_id FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if proj_full and proj_full["excel_id"]:
+                excel_service.update_excel_status(proj_full["excel_id"], "COMPLETED", final_url)
+                
             return {"status": "COMPLETED", "final_video_url": final_url}
         except Exception as e:
             db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, str(e), project_id))
             db.commit()
+            
+            proj_full = db.execute("SELECT excel_id FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if proj_full and proj_full["excel_id"]:
+                from app.services.excel_service import excel_service
+                excel_service.update_excel_status(proj_full["excel_id"], "FAILED", error=str(e))
+                
             raise HTTPException(status_code=500, detail=str(e))
