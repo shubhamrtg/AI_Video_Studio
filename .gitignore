@@ -1,0 +1,25 @@
+# Node
+node_modules/
+dist/
+build/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+env/
+.venv/
+
+# Data and Secrets
+backend/.env
+data/
+*.db
+*.sqlite3
+*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db

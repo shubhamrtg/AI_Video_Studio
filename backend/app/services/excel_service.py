@@ -1,0 +1,146 @@
+import os
+import uuid
+import openpyxl
+from pydantic import ValidationError
+from datetime import datetime
+from app.core.config import settings
+from app.db.database import get_db
+from app.models.project import ProjectCreate, ProjectStatus
+import logging
+
+logger = logging.getLogger(__name__)
+
+class ExcelService:
+    def __init__(self):
+        self.filepath = settings.EXCEL_WORKBOOK_PATH
+        self.sheet_name = "VideoIdeas"
+
+    def read_and_ingest(self):
+        """Reads QUEUED rows from Excel and ingests them into the DB."""
+        if not os.path.exists(self.filepath):
+            logger.error(f"Excel file not found at {self.filepath}")
+            return
+
+        try:
+            wb = openpyxl.load_workbook(self.filepath, data_only=True)
+            if self.sheet_name not in wb.sheetnames:
+                logger.error(f"Sheet {self.sheet_name} not found in workbook")
+                return
+            
+            ws = wb[self.sheet_name]
+            
+            # Map column names to indices
+            headers = {}
+            for col_idx, cell in enumerate(ws[1], 1):
+                if cell.value:
+                    headers[cell.value] = col_idx
+                    
+            required_cols = ["id", "video_idea", "target_duration_seconds", "aspect_ratio", "status"]
+            for col in required_cols:
+                if col not in headers:
+                    logger.error(f"Missing required column in Excel: {col}")
+                    return
+
+            rows_ingested = 0
+            
+            with get_db() as db:
+                for row_idx in range(2, ws.max_row + 1):
+                    status_val = ws.cell(row=row_idx, column=headers["status"]).value
+                    if status_val == "QUEUED":
+                        excel_id = str(ws.cell(row=row_idx, column=headers["id"]).value)
+                        
+                        # Check if already exists
+                        existing = db.execute("SELECT id FROM projects WHERE excel_id = ?", (excel_id,)).fetchone()
+                        if existing:
+                            continue
+                            
+                        try:
+                            project_data = ProjectCreate(
+                                excel_id=excel_id,
+                                video_idea=str(ws.cell(row=row_idx, column=headers["video_idea"]).value),
+                                target_duration=int(ws.cell(row=row_idx, column=headers["target_duration_seconds"]).value or 30),
+                                aspect_ratio=str(ws.cell(row=row_idx, column=headers["aspect_ratio"]).value or "16:9"),
+                                visual_style=ws.cell(row=row_idx, column=headers.get("visual_style", -1)).value if "visual_style" in headers else None,
+                                language=ws.cell(row=row_idx, column=headers.get("language", -1)).value if "language" in headers else "English",
+                                voice_style=ws.cell(row=row_idx, column=headers.get("voice_style", -1)).value if "voice_style" in headers else None,
+                                target_platform=ws.cell(row=row_idx, column=headers.get("target_platform", -1)).value if "target_platform" in headers else None,
+                                priority=ws.cell(row=row_idx, column=headers.get("priority", -1)).value if "priority" in headers else "Normal"
+                            )
+                            
+                            project_id = str(uuid.uuid4())
+                            
+                            db.execute("""
+                                INSERT INTO projects (
+                                    id, excel_id, video_idea, target_duration, aspect_ratio,
+                                    visual_style, language, voice_style, target_platform,
+                                    priority, status
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                project_id, project_data.excel_id, project_data.video_idea,
+                                project_data.target_duration, project_data.aspect_ratio,
+                                project_data.visual_style, project_data.language,
+                                project_data.voice_style, project_data.target_platform,
+                                project_data.priority, ProjectStatus.QUEUED.value
+                            ))
+                            
+                            # Write back the internal project_id
+                            if "project_id" in headers:
+                                ws.cell(row=row_idx, column=headers["project_id"]).value = project_id
+                                
+                            db.commit()
+                            rows_ingested += 1
+                            
+                        except (ValueError, ValidationError) as e:
+                            logger.error(f"Validation error on row {row_idx}: {e}")
+                            if "error_message" in headers:
+                                ws.cell(row=row_idx, column=headers["error_message"]).value = str(e)
+                            ws.cell(row=row_idx, column=headers["status"]).value = "VALIDATION_FAILED"
+            
+            if rows_ingested > 0 or "VALIDATION_FAILED" in [ws.cell(row=i, column=headers["status"]).value for i in range(2, ws.max_row+1)]:
+                # Try saving safely
+                try:
+                    wb.save(self.filepath)
+                    logger.info(f"Ingested {rows_ingested} new ideas.")
+                except PermissionError:
+                    logger.error("Could not save Excel. Close the file if open.")
+                    
+        except Exception as e:
+            logger.error(f"Failed to ingest Excel: {e}")
+
+    def update_excel_status(self, excel_id: str, status: str, output_path: str = None, error: str = None):
+        """Updates the status of a specific row in the Excel sheet."""
+        if not os.path.exists(self.filepath):
+            return
+
+        try:
+            wb = openpyxl.load_workbook(self.filepath)
+            ws = wb[self.sheet_name]
+            
+            headers = {cell.value: col_idx for col_idx, cell in enumerate(ws[1], 1) if cell.value}
+            
+            if "id" not in headers or "status" not in headers:
+                return
+                
+            for row_idx in range(2, ws.max_row + 1):
+                cell_id = str(ws.cell(row=row_idx, column=headers["id"]).value)
+                if cell_id == excel_id:
+                    ws.cell(row=row_idx, column=headers["status"]).value = status
+                    
+                    if output_path and "output_path" in headers:
+                        ws.cell(row=row_idx, column=headers["output_path"]).value = output_path
+                        
+                    if error and "error_message" in headers:
+                        ws.cell(row=row_idx, column=headers["error_message"]).value = error
+                        
+                    if status == "COMPLETED" and "completed_at" in headers:
+                        ws.cell(row=row_idx, column=headers["completed_at"]).value = datetime.now().isoformat()
+                        
+                    try:
+                        wb.save(self.filepath)
+                    except PermissionError:
+                        logger.error("Could not save Excel. File is locked.")
+                    break
+        except Exception as e:
+            logger.error(f"Failed to update Excel status: {e}")
+
+excel_service = ExcelService()
