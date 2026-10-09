@@ -9,6 +9,8 @@ from app.services.excel_service import excel_service
 
 def test_full_e2e_workflow(test_client, tmp_path, monkeypatch):
     import subprocess
+    from app.services.orchestration_service import orchestration_service
+    from app.core.config import settings
     
     # 1. Setup mock excel
     temp_excel = tmp_path / "video_ideas.xlsx"
@@ -20,7 +22,6 @@ def test_full_e2e_workflow(test_client, tmp_path, monkeypatch):
     ws.append(["EX-E2E", "A fully end-to-end test", 6, "16:9", "QUEUED", ""])
     wb.save(temp_excel)
     
-    from app.core.config import settings
     monkeypatch.setattr(settings, "EXCEL_WORKBOOK_PATH", str(temp_excel))
     
     # Setup mock subprocess for ffmpeg/ffprobe
@@ -41,43 +42,33 @@ def test_full_e2e_workflow(test_client, tmp_path, monkeypatch):
         
     monkeypatch.setattr(subprocess, "run", mock_run)
 
+    # Ingest (triggers background thread usually, but here we can wait)
+    # To avoid background thread race conditions during test, we mock `trigger_pipeline`
+    # and just call `run_pipeline_sync` ourselves.
+    
+    triggered_projects = []
+    def mock_trigger(pid):
+        triggered_projects.append(pid)
+        
+    monkeypatch.setattr(orchestration_service, "trigger_pipeline", mock_trigger)
+    
     # Ingest
     excel_service.read_and_ingest()
     
-    # Get project id
+    # Verify it queued
+    assert len(triggered_projects) == 1
+    project_id = triggered_projects[0]
+    
+    # Run the pipeline synchronously to completion
+    orchestration_service.run_pipeline_sync(project_id)
+    
+    # Verify final status
     from app.db.database import get_db
     with get_db() as db:
-        proj = db.execute("SELECT id FROM projects WHERE excel_id = 'EX-E2E'").fetchone()
-    
-    project_id = proj["id"]
-    
-    # Verify status is QUEUED
-    resp = test_client.get(f"/api/projects/{project_id}")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "QUEUED"
-    
-    # Storyboard is supposed to be generated in background task during direct API post,
-    # but Excel ingest just queues. Wait, excel ingest DOES NOT trigger background tasks!
-    # Ah! Excel ingest just puts it in QUEUED. We need an orchestrator step to trigger it!
-    # But wait, my test_client can just call the endpoints.
-    # We will pretend the UI triggers generation or we just manually update status for assembly test
-    
-    with get_db() as db:
-        db.execute("UPDATE projects SET status = 'STORYBOARDING' WHERE id = ?", (project_id,))
-        db.execute("INSERT INTO shots (id, project_id, shot_number, duration, description, camera, subject, action, lighting, style, continuity_notes, negative_prompt, status, video_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
-                   ("shot1", project_id, 1, 6, "desc", "cam", "sub", "act", "light", "style", "notes", "", "COMPLETED", f"/projects/{project_id}/shots/shot1.mp4"))
-        db.commit()
-        
-        # Create dummy shot file
-        from pathlib import Path
-        shot_dir = Path(settings.DATA_DIR) / "projects" / project_id / "shots"
-        shot_dir.mkdir(parents=True, exist_ok=True)
-        (shot_dir / "shot1.mp4").touch()
-        
-    # Assemble
-    resp = test_client.post(f"/api/projects/{project_id}/assemble")
-    assert resp.status_code == 200, f"Failed: {resp.text}"
-    assert resp.json()["status"] == "COMPLETED"
+        proj = db.execute("SELECT status, final_video_url FROM projects WHERE id = ?", (project_id,)).fetchone()
+        assert proj["status"] == "COMPLETED"
+        assert proj["final_video_url"] is not None
+        assert proj["final_video_url"].endswith(".mp4")
     
     # Check excel writeback
     wb_read = openpyxl.load_workbook(temp_excel)

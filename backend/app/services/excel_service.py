@@ -46,6 +46,8 @@ class ExcelService:
 
             rows_ingested = 0
             
+            ingested_project_ids = []
+            
             with get_db() as db:
                 for row_idx in range(2, ws.max_row + 1):
                     status_val = ws.cell(row=row_idx, column=headers["status"]).value
@@ -92,6 +94,7 @@ class ExcelService:
                                 
                             db.commit()
                             rows_ingested += 1
+                            ingested_project_ids.append(project_id)
                             
                         except (ValueError, ValidationError) as e:
                             logger.error(f"Validation error on row {row_idx}: {e}")
@@ -106,6 +109,12 @@ class ExcelService:
                     logger.info(f"Ingested {rows_ingested} new ideas.")
                 except PermissionError:
                     logger.error("Could not save Excel. Close the file if open.")
+                    
+            # Trigger orchestration background jobs for successfully ingested projects
+            if ingested_project_ids:
+                from app.services.orchestration_service import orchestration_service
+                for pid in ingested_project_ids:
+                    orchestration_service.trigger_pipeline(pid)
                     
         except Exception as e:
             logger.error(f"Failed to ingest Excel: {e}")

@@ -7,21 +7,22 @@ An end-to-end automated platform for generating videos from ideas in an Excel sp
 * **Backend:** FastAPI, SQLite, FFmpeg (for assembly)
 * **Frontend:** React + Vite
 * **AI Provider:** Google Gemini API (Veo)
+* **Job Execution:** Bounded concurrent execution using `ThreadPoolExecutor` within the backend process.
 
 ## Features & Supported Lifecycle States
 
 The application orchestrates video projects through the following states:
 1. `QUEUED` - Ingested from Excel.
 2. `VALIDATING` - Checking requirements.
-3. `SCRIPTING` - Generating a text script.
+3. `SCRIPTING` - (Placeholder - not yet implemented natively)
 4. `STORYBOARDING` - Breaking the script into individual shots of exact duration.
 5. `PREPARING_REFERENCES` (Placeholder)
 6. `GENERATING_AUDIO` (Placeholder)
 7. `GENERATING_VIDEO` - Sending exact-length prompts to Veo (4-8s each).
-8. `ASSEMBLING` - Using FFmpeg to compile and transcode the generated shots.
-9. `VALIDATING_OUTPUT` - Verifying final artifact length and format.
+8. `ASSEMBLING` - Using FFmpeg to compile and transcode the generated shots perfectly matching `target_duration`.
+9. `VALIDATING_OUTPUT` - Verifying final artifact length, presence of audio, and format.
 10. `READY_FOR_REVIEW` - Available in UI.
-11. `COMPLETED` - Approved and finalized.
+11. `COMPLETED` - Approved and finalized (Excel writeback occurs).
 12. `FAILED` - Errored out at any stage.
 13. `CANCELLED`
 
@@ -29,7 +30,7 @@ The application orchestrates video projects through the following states:
 
 * Python 3.12+
 * Node.js 18+
-* FFmpeg (must be installed and in the system `PATH`)
+* FFmpeg & ffprobe (must be installed and in the system `PATH`)
 
 ## Setup
 
@@ -59,24 +60,47 @@ The application orchestrates video projects through the following states:
 
 1. Create a `video_ideas.xlsx` workbook in the root folder.
 2. Ensure there is a sheet named `VideoIdeas` with columns: `id`, `video_idea`, `target_duration_seconds`, `aspect_ratio`, `status`, `project_id`.
-3. Put `QUEUED` in the status column.
-4. Call `POST /api/orchestration/ingest` (or click Ingest in the UI) to load them.
+3. Supported orientations: `16:9` (Landscape) and `9:16` (Portrait).
+4. Put `QUEUED` in the status column.
+5. Call `POST /api/orchestration/ingest` (or click Ingest in the UI) to load them.
+6. Processing occurs in the background via a bounded `ThreadPoolExecutor` (Max 3 concurrent jobs).
+7. Final MP4 output paths and final statuses (`COMPLETED`, `FAILED`) are written directly back to the Excel file alongside the initial records.
+
+## Audio Policy
+
+The application strictly enforces an explicit audio policy:
+- **`silent` (Default):** The generated video is forced to have no audio streams. If clips possess audio, they are dropped during FFmpeg assembly.
+- **`preserve`:** The generated video preserves the audio of the source clips. A strict validation will fail the job if a source clip lacks audio when `preserve` mode is activated.
+
+*Note: AI Narration and Music Mixing are not yet fully implemented.*
+
+## Output Locations
+
+Outputs are reliably deposited into the configured `DATA_DIR` directory:
+- Temporary assembly artifacts: `DATA_DIR/projects/<id>/final/temp_final.mp4`
+- Validated Final Videos: `DATA_DIR/projects/<id>/final/final.mp4`
+- Raw Generated Shots: `DATA_DIR/projects/<id>/shots/shotX.mp4`
 
 ## Tests
 
 The repository now uses `pytest` with a dedicated, deterministic automated test suite.
 
-* **Unit and Mocked Pipeline Tests:**
+* **Offline Unit and Mocked API Pipeline Tests:**
   Run the automated test suite without hitting real paid API limits:
   ```powershell
   cd backend
   $env:PYTHONPATH = "d:\Antigravity_Projects\AI_Video_Studio\backend"
   pytest tests/
   ```
-  *(These tests use a temporary isolated database and temporary mock Excel sheets.)*
 
-* **Real Provider Integration Test (Optional):**
-  If you have an active API key and FFmpeg installed, you can trigger an end-to-end run by starting the backend and hitting the endpoint manually or via the frontend UI.
+* **Genuine Media Integration Tests:**
+  The suite includes `tests/test_media_integration.py` which synthetically generates exact 4-second `.mp4` chunks directly with local FFmpeg without consuming paid APIs, then assemblies and probes them to prove FFmpeg pipeline reliability.
+
+## Known Limitations
+
+- **State Recovery:** Background jobs are held in `ThreadPoolExecutor`. In the event of a sudden server crash, pending jobs that were in `GENERATING_VIDEO` or `STORYBOARDING` will remain in a stuck state in the Database. A full retry logic / recovery command is not yet fully implemented.
+- **Narration Provider:** The AI Script Generation (`SCRIPTING`) and Audio Speech (`GENERATING_AUDIO`) integrations are modeled but lack integrated backend provider wrappers in this release.
+- **Shot Chunk limits:** External provider bounds dictate shots must be strictly between 4.0 and 8.0 seconds.
 
 ## Running the Application
 
