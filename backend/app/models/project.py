@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
 from typing import List, Optional
 from enum import Enum
 from datetime import datetime
@@ -26,11 +26,20 @@ class ShotStatus(str, Enum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
 
+class AspectRatio(str, Enum):
+    LANDSCAPE = "16:9"
+    PORTRAIT = "9:16"
+
+class AudioPolicy(str, Enum):
+    SILENT = "silent"
+    PRESERVE = "preserve"
+
 class ProjectCreate(BaseModel):
     excel_id: Optional[str] = None
-    video_idea: str
-    target_duration: int
-    aspect_ratio: str
+    video_idea: str = Field(..., min_length=1)
+    target_duration: int = Field(..., gt=0)
+    aspect_ratio: AspectRatio
+    audio_policy: AudioPolicy = AudioPolicy.SILENT
     visual_style: Optional[str] = None
     language: Optional[str] = "English"
     voice_style: Optional[str] = None
@@ -64,6 +73,7 @@ class ProjectResponse(BaseModel):
     video_idea: str
     target_duration: int
     aspect_ratio: str
+    audio_policy: str
     status: ProjectStatus
     script_text: Optional[str] = None
     final_video_url: Optional[str] = None

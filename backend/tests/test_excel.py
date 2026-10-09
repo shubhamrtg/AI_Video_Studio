@@ -23,6 +23,9 @@ def test_excel_ingestion(test_client, monkeypatch):
     from app.core.config import settings
     monkeypatch.setattr(settings, "EXCEL_WORKBOOK_PATH", temp_excel)
     
+    from app.services.orchestration_service import orchestration_service
+    monkeypatch.setattr(orchestration_service, "trigger_pipeline", lambda pid: None)
+    
     # Call ingest
     from app.services.excel_service import excel_service
     excel_service.read_and_ingest()

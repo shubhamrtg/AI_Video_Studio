@@ -35,9 +35,12 @@ class StoryboardService:
         Return the storyboard as a JSON array of shot objects.
         """
         
-        if settings.GEMINI_API_KEY == "" or settings.GEMINI_API_KEY == "dummy_key":
-            logger.warning("GEMINI_API_KEY is not configured. Returning dummy storyboard for testing.")
+        if settings.MOCK_PROVIDER_ENABLED:
+            logger.warning("Mock provider is enabled. Returning dummy storyboard for testing.")
             return self._generate_dummy_storyboard(target_duration)
+
+        if not settings.GEMINI_API_KEY or settings.GEMINI_API_KEY == "dummy_key":
+            raise RuntimeError("Valid GEMINI_API_KEY is required in production mode.")
             
         max_retries = 3
         last_error = None

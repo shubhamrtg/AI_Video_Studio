@@ -117,6 +117,23 @@ def run_migrations(conn):
             logger.error(f"Migration 2 failed: {e}")
             raise
 
+    if current_version < 3:
+        try:
+            logger.info("Applying migration 3: Add audio_policy")
+            cursor.execute("BEGIN TRANSACTION")
+            
+            project_columns = [row[1] for row in cursor.execute("PRAGMA table_info(projects)").fetchall()]
+            if "audio_policy" not in project_columns:
+                cursor.execute("ALTER TABLE projects ADD COLUMN audio_policy TEXT DEFAULT 'silent'")
+                
+            cursor.execute("INSERT INTO schema_migrations (version) VALUES (3)")
+            conn.commit()
+            current_version = 3
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Migration 3 failed: {e}")
+            raise
+
 def init_db():
     os.makedirs(settings.DATA_DIR, exist_ok=True)
     with sqlite3.connect(get_db_path()) as conn:
@@ -125,6 +142,7 @@ def init_db():
 @contextmanager
 def get_db():
     conn = sqlite3.connect(get_db_path())
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     try:
         yield conn

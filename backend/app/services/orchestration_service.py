@@ -14,10 +14,14 @@ logger = logging.getLogger(__name__)
 class OrchestrationService:
     def __init__(self):
         # Bound concurrent generation jobs
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        self.max_workers = 3
+        self.max_queue = 10
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
 
     def trigger_pipeline(self, project_id: str):
-        """Asynchronously start the pipeline."""
+        """Asynchronously start the pipeline. Rejects if queue is full."""
+        if self.executor._work_queue.qsize() >= self.max_queue:
+            raise RuntimeError(f"Orchestration queue is at capacity ({self.max_queue}). Try again later.")
         self.executor.submit(self.run_pipeline_sync, project_id)
 
     def run_pipeline_sync(self, project_id: str):
@@ -45,6 +49,7 @@ class OrchestrationService:
                 video_idea = project["video_idea"]
                 target_dur = project["target_duration"]
                 aspect = project["aspect_ratio"]
+                audio_policy = project["audio_policy"] if "audio_policy" in project.keys() else "silent"
 
                 db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.STORYBOARDING.value, project_id))
                 db.commit()
@@ -84,13 +89,12 @@ class OrchestrationService:
                 db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.ASSEMBLING.value, project_id))
                 db.commit()
                 
-            # Assume audio_mode = "silent" unless audio_requirements exists in project (not in schema yet, hardcoding silent for now as default safe mode)
             final_url = assembly_service.assemble_shots(
                 project_id=project_id,
                 shot_paths=shot_paths,
                 target_duration=target_dur,
                 aspect_ratio=aspect,
-                audio_mode="silent" # Audio policy defined explicitly
+                audio_mode=audio_policy
             )
             
             # 5. Complete

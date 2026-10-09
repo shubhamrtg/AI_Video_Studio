@@ -1,11 +1,10 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException
 from datetime import datetime, timezone
 import uuid
 from typing import List
 import os
 from app.models.project import ProjectCreate, ProjectResponse, ProjectStatus, ShotResponse, ShotStatus
 from app.db.database import get_db
-from app.services.storyboard_service import storyboard_service
 from app.services.video_provider import video_provider
 from app.core.config import settings
 
@@ -36,49 +35,33 @@ def get_project_shots(db, project_id: str) -> List[ShotResponse]:
     ]
 
 @router.post("/", response_model=ProjectResponse)
-def create_project(project_in: ProjectCreate, background_tasks: BackgroundTasks):
+def create_project(project_in: ProjectCreate):
     project_id = str(uuid.uuid4())
     
     with get_db() as db:
         db.execute(
-            """INSERT INTO projects (id, excel_id, video_idea, target_duration, aspect_ratio, visual_style, language, voice_style, target_platform, priority, status) 
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (project_id, project_in.excel_id, project_in.video_idea, project_in.target_duration, project_in.aspect_ratio, project_in.visual_style, project_in.language, project_in.voice_style, project_in.target_platform, project_in.priority, ProjectStatus.QUEUED.value)
+            """INSERT INTO projects (id, excel_id, video_idea, target_duration, aspect_ratio, audio_policy, visual_style, language, voice_style, target_platform, priority, status) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (project_id, project_in.excel_id, project_in.video_idea, project_in.target_duration, project_in.aspect_ratio.value, project_in.audio_policy.value, project_in.visual_style, project_in.language, project_in.voice_style, project_in.target_platform, project_in.priority, ProjectStatus.QUEUED.value)
         )
         db.commit()
     
-    def generate_storyboard_task(pid: str, idea: str, duration: int):
-        try:
-            with get_db() as db:
-                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.STORYBOARDING.value, pid))
-                db.commit()
-
-            shots = storyboard_service.generate_storyboard(idea, duration)
-            with get_db() as db:
-                for shot in shots:
-                    shot_id = str(uuid.uuid4())
-                    db.execute(
-                        """INSERT INTO shots 
-                        (id, project_id, shot_number, duration, description, camera, subject, action, lighting, style, continuity_notes, negative_prompt, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (shot_id, pid, shot.shot_number, shot.duration, shot.description, shot.camera, shot.subject, shot.action, shot.lighting, shot.style, shot.continuity_notes, shot.negative_prompt, ShotStatus.PENDING.value)
-                    )
-                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.READY_FOR_REVIEW.value, pid))
-                db.commit()
-        except Exception as e:
-            with get_db() as db:
-                db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, str(e), pid))
-                db.commit()
-            print(f"Storyboard generation failed: {e}")
-
-    background_tasks.add_task(generate_storyboard_task, project_id, project_in.video_idea, project_in.target_duration)
+    from app.services.orchestration_service import orchestration_service
+    try:
+        orchestration_service.trigger_pipeline(project_id)
+    except RuntimeError as e:
+        with get_db() as db:
+            db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, str(e), project_id))
+            db.commit()
+        raise HTTPException(status_code=429, detail=str(e))
     
     return ProjectResponse(
         id=project_id,
         excel_id=project_in.excel_id or "",
         video_idea=project_in.video_idea,
         target_duration=project_in.target_duration,
-        aspect_ratio=project_in.aspect_ratio,
+        aspect_ratio=project_in.aspect_ratio.value,
+        audio_policy=project_in.audio_policy.value,
         status=ProjectStatus.QUEUED,
         created_at=datetime.now(timezone.utc).isoformat(),
         shots=[]
@@ -99,6 +82,7 @@ def get_project(project_id: str):
             video_idea=row["video_idea"],
             target_duration=row["target_duration"],
             aspect_ratio=row["aspect_ratio"],
+            audio_policy=row["audio_policy"] if "audio_policy" in row.keys() else "silent",
             status=ProjectStatus(row["status"]),
             script_text=row["script_text"],
             final_video_url=row["final_video_url"],

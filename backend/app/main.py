@@ -7,9 +7,16 @@ from app.routers import projects, orchestration
 from app.db.database import init_db
 from app.core.config import settings
 
-app = FastAPI(title="AI Video Studio API")
+from contextlib import asynccontextmanager
 
-ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+app = FastAPI(title="AI Video Studio API", lifespan=lifespan)
+
+ALLOWED_ORIGINS = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",") if origin.strip()]
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,10 +25,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
-
-@app.on_event("startup")
-def on_startup():
-    init_db()
 
 app.include_router(projects.router, prefix="/api/projects")
 app.include_router(orchestration.router)

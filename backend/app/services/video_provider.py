@@ -38,26 +38,26 @@ class GoogleVeoProvider:
             # Veo only explicitly supports "16:9" or "9:16", default 16:9
             veo_ar = aspect_ratio if aspect_ratio in ["16:9", "9:16"] else "16:9"
 
-            if settings.GEMINI_API_KEY == "" or settings.GEMINI_API_KEY == "dummy_key":
-                # Mock generation for tests
+            if settings.MOCK_PROVIDER_ENABLED:
+                logger.info("Mock provider is enabled. Generating synthetic blue video.")
                 project_dir = os.path.join(settings.DATA_DIR, "projects", project_id, "shots")
                 os.makedirs(project_dir, exist_ok=True)
                 local_path = os.path.join(project_dir, f"{shot_id}.mp4")
                 
-                # We need actual ffmpeg to make a mock video if running media tests, otherwise touch
+                import subprocess
+                w, h = (1080, 1920) if veo_ar == "9:16" else (1920, 1080)
+                cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=blue:s={w}x{h}:d={veo_duration}", "-c:v", "libx264", local_path]
                 try:
-                    import subprocess
-                    w, h = (1080, 1920) if veo_ar == "9:16" else (1920, 1080)
-                    cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=blue:s={w}x{h}:d={veo_duration}", "-c:v", "libx264", local_path]
                     subprocess.run(cmd, check=True, capture_output=True)
-                except Exception:
-                    # Fallback to touch if no ffmpeg
-                    with open(local_path, "w") as f:
-                        f.write("mock")
+                except FileNotFoundError:
+                    raise RuntimeError("FFmpeg is not installed or not in PATH, cannot generate synthetic media.")
                 
                 video_url = f"/projects/{project_id}/shots/{shot_id}.mp4"
                 update_shot_status(shot_id, ShotStatus.COMPLETED, video_url=video_url)
                 return video_url
+
+            if not settings.GEMINI_API_KEY or settings.GEMINI_API_KEY == "dummy_key":
+                raise RuntimeError("Valid GEMINI_API_KEY is required in production mode.")
 
             operation = self.client.models.generate_videos(
                 model=self.model,
