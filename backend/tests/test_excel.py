@@ -13,11 +13,11 @@ def test_excel_ingestion(test_client, monkeypatch):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "VideoIdeas"
-    headers = ["id", "video_idea", "target_duration_seconds", "aspect_ratio", "status", "project_id"]
+    headers = ["id", "video_idea", "target_duration_seconds", "aspect_ratio", "status", "project_id", "output_path", "error_message"]
     ws.append(headers)
-    ws.append(["EX-01", "Cat riding a roomba", 10, "16:9", "QUEUED", ""])
-    ws.append(["EX-02", "Dog playing piano", 5, "9:16", "COMPLETED", ""])
-    ws.append(["=SUM(1,2)", "Formula test", 5, "9:16", "COMPLETED", ""])
+    ws.append(["EX-01", "Cat riding a roomba", 10, "16:9", "QUEUED", "", "", ""])
+    ws.append(["EX-02", "Dog playing piano", 5, "9:16", "COMPLETED", "", "", ""])
+    ws.append(["=SUM(1,2)", "Formula test", 5, "9:16", "COMPLETED", "", "", ""])
     wb.save(temp_excel)
     
     # Override settings
@@ -52,7 +52,7 @@ def test_excel_ingestion(test_client, monkeypatch):
     assert ws_read.cell(row=2, column=5).value == "COMPLETED"
     
     # Negative test: invalid row
-    ws_read.append(["EX-03", "", "invalid", "16:9", "QUEUED", ""]) # Invalid duration, empty idea
+    ws_read.append(["EX-03", "", "invalid", "16:9", "QUEUED", "", "", ""]) # Invalid duration, empty idea
     wb_read.save(temp_excel)
     excel_service.read_and_ingest()
     # Read back to verify formulas were not destroyed

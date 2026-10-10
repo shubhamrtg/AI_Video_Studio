@@ -45,7 +45,7 @@ class ExcelService:
                     if cell.value:
                         headers[cell.value] = col_idx
                         
-                required_cols = ["id", "video_idea", "target_duration_seconds", "aspect_ratio", "status"]
+                required_cols = ["id", "video_idea", "target_duration_seconds", "aspect_ratio", "status", "output_path", "error_message"]
                 for col in required_cols:
                     if col not in headers:
                         logger.error(f"Missing required column in Excel: {col}")
@@ -151,8 +151,8 @@ class ExcelService:
                 
                 headers = {cell.value: col_idx for col_idx, cell in enumerate(ws[1], 1) if cell.value}
                 
-                if "id" not in headers or "status" not in headers:
-                    raise ValueError("Required columns 'id' and 'status' not found in worksheet.")
+                if "id" not in headers or "status" not in headers or "output_path" not in headers or "error_message" not in headers:
+                    raise ValueError("Required columns 'id', 'status', 'output_path', and 'error_message' not found in worksheet.")
                     
                 row_found = False
                 for row_idx in range(2, ws.max_row + 1):
@@ -161,10 +161,10 @@ class ExcelService:
                         row_found = True
                         ws.cell(row=row_idx, column=headers["status"]).value = status
                         
-                        if output_path and "output_path" in headers:
+                        if output_path:
                             ws.cell(row=row_idx, column=headers["output_path"]).value = output_path
                             
-                        if error and "error_message" in headers:
+                        if error:
                             ws.cell(row=row_idx, column=headers["error_message"]).value = error
                             
                         if status == "COMPLETED" and "completed_at" in headers:

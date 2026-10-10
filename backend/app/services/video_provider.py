@@ -36,8 +36,13 @@ class GoogleVeoProvider:
 
     def generate_video_sync(self, project_id: str, shot_id: str, prompt: str, duration: int, aspect_ratio: str = "16:9") -> str:
         try:
+            with get_db() as db:
+                existing = db.execute("SELECT status, video_url FROM shots WHERE id = ?", (shot_id,)).fetchone()
+                if existing and existing["status"] == ShotStatus.COMPLETED.value:
+                    return existing["video_url"]
+                    
             if not claim_shot_generation(shot_id):
-                raise RuntimeError("Shot is already generating or completed.")
+                raise RuntimeError("Shot is currently generating in another process.")
             
             logger.info(f"[{shot_id}] Calling Veo API with models.generate_videos...")
             import time

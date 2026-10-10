@@ -85,33 +85,45 @@ class OrchestrationService:
                 audio_policy = project["audio_policy"] if "audio_policy" in project.keys() else "silent"
 
             # 2. Storyboarding
-            shots = storyboard_service.generate_storyboard(video_idea, target_dur)
-            
             with get_db() as db:
-                # Save shots
+                existing_shots = db.execute("SELECT * FROM shots WHERE project_id = ? ORDER BY shot_number ASC", (project_id,)).fetchall()
+                
+            if existing_shots:
+                # Reuse existing shots
+                shot_paths = []
+                for shot in existing_shots:
+                    shot_id = shot["id"]
+                    video_url = video_provider.generate_video_sync(project_id, shot_id, shot["description"], shot["duration"], aspect)
+                    from app.core.path_utils import public_url_to_local_path
+                    shot_paths.append(public_url_to_local_path(video_url))
+            else:
+                shots = storyboard_service.generate_storyboard(video_idea, target_dur)
+                
+                with get_db() as db:
+                    # Save shots
+                    for shot in shots:
+                        shot_id = f"{project_id}_s{shot.shot_number}"
+                        db.execute("""
+                            INSERT OR IGNORE INTO shots 
+                            (id, project_id, shot_number, duration, description, camera, subject, action, lighting, style, continuity_notes, negative_prompt, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            shot_id, project_id, shot.shot_number, shot.duration, shot.description, 
+                            shot.camera, shot.subject, shot.action, shot.lighting, shot.style, 
+                            shot.continuity_notes, "none", ShotStatus.QUEUED.value
+                        ))
+                    db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.GENERATING_VIDEO.value, project_id))
+                    db.commit()
+                    
+                # 3. Generating Shots
+                shot_paths = []
                 for shot in shots:
                     shot_id = f"{project_id}_s{shot.shot_number}"
-                    db.execute("""
-                        INSERT OR IGNORE INTO shots 
-                        (id, project_id, shot_number, duration, description, camera, subject, action, lighting, style, continuity_notes, negative_prompt, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        shot_id, project_id, shot.shot_number, shot.duration, shot.description, 
-                        shot.camera, shot.subject, shot.action, shot.lighting, shot.style, 
-                        shot.continuity_notes, "none", ShotStatus.QUEUED.value
-                    ))
-                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.GENERATING_VIDEO.value, project_id))
-                db.commit()
-                
-            # 3. Generating Shots
-            shot_paths = []
-            for shot in shots:
-                shot_id = f"{project_id}_s{shot.shot_number}"
-                video_url = video_provider.generate_video_sync(project_id, shot_id, shot.description, shot.duration, aspect)
-                
-                from app.core.path_utils import public_url_to_local_path
-                local_path = public_url_to_local_path(video_url)
-                shot_paths.append(local_path)
+                    video_url = video_provider.generate_video_sync(project_id, shot_id, shot.description, shot.duration, aspect)
+                    
+                    from app.core.path_utils import public_url_to_local_path
+                    local_path = public_url_to_local_path(video_url)
+                    shot_paths.append(local_path)
                 
             # 4. Assemble
             with get_db() as db:

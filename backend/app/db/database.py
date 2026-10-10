@@ -23,6 +23,42 @@ def run_migrations(conn):
     version_row = cursor.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
     current_version = version_row[0] if version_row and version_row[0] is not None else 0
 
+    if current_version >= 1:
+        project_columns = [row[1] for row in cursor.execute("PRAGMA table_info(projects)").fetchall()]
+        shot_columns = [row[1] for row in cursor.execute("PRAGMA table_info(shots)").fetchall()]
+        
+        if not project_columns or not shot_columns:
+            raise RuntimeError(f"Database claims version {current_version} but base tables are missing.")
+            
+        if current_version >= 2:
+            expected_p2 = ["excel_id", "video_idea", "visual_style", "language", "voice_style", "target_platform", "priority", "script_text", "final_video_url", "error"]
+            missing_p2 = [col for col in expected_p2 if col not in project_columns]
+            expected_s2 = ["audio_requirements", "narration_text"]
+            missing_s2 = [col for col in expected_s2 if col not in shot_columns]
+            
+            if missing_p2 or missing_s2:
+                raise RuntimeError(f"Database claims version >= 2 but is missing columns: projects{missing_p2}, shots{missing_s2}. Manual intervention required to prevent data loss.")
+        
+        # Verify Migration 3
+        if current_version >= 3 and "audio_policy" not in project_columns:
+            logger.warning("Inconsistent schema detected: migration history claims version >= 3 but 'audio_policy' is missing. Safely repairing.")
+            cursor.execute("ALTER TABLE projects ADD COLUMN audio_policy TEXT DEFAULT 'silent'")
+            conn.commit()
+            project_columns.append("audio_policy")
+            
+        # Verify Migration 4
+        if current_version >= 4:
+            needs_repair = False
+            if "sync_status" not in project_columns:
+                cursor.execute("ALTER TABLE projects ADD COLUMN sync_status TEXT DEFAULT 'PENDING'")
+                needs_repair = True
+            if "sync_error" not in project_columns:
+                cursor.execute("ALTER TABLE projects ADD COLUMN sync_error TEXT")
+                needs_repair = True
+            if needs_repair:
+                logger.warning("Inconsistent schema detected: migration history claims version >= 4 but sync columns are missing. Safely repairing.")
+                conn.commit()
+
     if current_version < 1:
         try:
             logger.info("Applying migration 1")

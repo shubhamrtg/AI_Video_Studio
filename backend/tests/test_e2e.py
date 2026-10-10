@@ -23,9 +23,9 @@ def test_full_e2e_workflow(test_client, monkeypatch):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "VideoIdeas"
-    headers = ["id", "video_idea", "target_duration_seconds", "aspect_ratio", "status", "project_id"]
+    headers = ["id", "video_idea", "target_duration_seconds", "aspect_ratio", "status", "project_id", "output_path", "error_message"]
     ws.append(headers)
-    ws.append(["EX-E2E", "A fully end-to-end test", 6, "16:9", "QUEUED", ""])
+    ws.append(["EX-E2E", "A fully end-to-end test", 6, "16:9", "QUEUED", "", "", ""])
     wb.save(temp_excel)
     
     monkeypatch.setattr(settings, "EXCEL_WORKBOOK_PATH", str(temp_excel))
@@ -92,6 +92,7 @@ def test_full_e2e_workflow(test_client, monkeypatch):
     wb_read = openpyxl.load_workbook(temp_excel)
     ws_read = wb_read["VideoIdeas"]
     assert ws_read.cell(row=2, column=5).value == "READY_FOR_REVIEW"
+    assert ws_read.cell(row=2, column=7).value == proj["final_video_url"]
 
     # Now approve it
     response = test_client.post(f"/api/projects/{project_id}/approve")
@@ -157,3 +158,23 @@ def test_atomic_claim_concurrency(test_client, monkeypatch):
         
     # Only 1 execution should have happened!
     assert execution_count[0] == 1
+def test_retry_recovery(test_client, monkeypatch):
+    import uuid
+    from app.db.database import get_db
+    from app.models.project import ProjectStatus
+    
+    project_id = str(uuid.uuid4())
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO projects (id, video_idea, target_duration, aspect_ratio, status) VALUES (?, ?, ?, ?, ?)",
+            (project_id, "Retry test", 10, "16:9", ProjectStatus.FAILED.value)
+        )
+        db.commit()
+        
+    # Trigger retry
+    resp = test_client.post(f"/api/projects/{project_id}/retry")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "QUEUED"
+    
+    # DB state should be QUEUED before the thread starts executing
+    # (assuming thread hasn't picked it up immediately or even if it did, it would be STORYBOARDING, but we mocked trigger_pipeline if we want)

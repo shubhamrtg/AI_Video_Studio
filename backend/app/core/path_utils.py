@@ -1,25 +1,35 @@
 import os
+from pathlib import Path
 from app.core.config import settings
+
+def _get_projects_dir() -> Path:
+    return Path(settings.DATA_DIR).resolve() / "projects"
 
 def public_url_to_local_path(url: str) -> str:
     if not url or not url.startswith("/projects/"):
         raise ValueError(f"Invalid public URL format: {url}")
         
     relative_path = url[len("/projects/"):]
-    relative_path = relative_path.replace("/", os.sep)
+    projects_dir = _get_projects_dir()
     
-    if ".." in relative_path or relative_path.startswith(os.sep):
-        raise ValueError("Invalid path sequence detected in URL.")
+    # Resolve the path to clear symlinks and relative components
+    candidate_path = (projects_dir / relative_path).resolve()
+    
+    # Path-aware containment check
+    if not candidate_path.is_relative_to(projects_dir):
+        raise ValueError("Path traversal detected: URL resolves outside projects root.")
         
-    return os.path.normpath(os.path.join(settings.DATA_DIR, "projects", relative_path))
+    return str(candidate_path)
 
 def local_path_to_public_url(local_path: str) -> str:
-    projects_dir = os.path.normpath(os.path.join(settings.DATA_DIR, "projects"))
-    norm_path = os.path.normpath(local_path)
+    projects_dir = _get_projects_dir()
+    candidate_path = Path(local_path).resolve()
     
-    if not norm_path.startswith(projects_dir):
+    # Path-aware containment check
+    if not candidate_path.is_relative_to(projects_dir):
         raise ValueError("Path is outside the configured projects data directory.")
         
-    relative = os.path.relpath(norm_path, projects_dir)
-    return "/projects/" + relative.replace("\\", "/")
+    # On Windows, relpath uses backslashes, so we convert them to forward slashes for the URL
+    relative = candidate_path.relative_to(projects_dir).as_posix()
+    return f"/projects/{relative}"
 
