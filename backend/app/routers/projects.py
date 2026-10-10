@@ -273,28 +273,29 @@ def retry_project(project_id: str):
     """
     Retries a FAILED project from where it left off, recovering it and enqueuing it.
     """
+    from app.services.orchestration_service import orchestration_service
+    
     with get_db() as db:
         project = db.execute("SELECT status FROM projects WHERE id = ?", (project_id,)).fetchone()
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
             
         status = project["status"]
-        if status in [ProjectStatus.STORYBOARDING.value, ProjectStatus.GENERATING_VIDEO.value, ProjectStatus.ASSEMBLING.value, ProjectStatus.VALIDATING_OUTPUT.value, ProjectStatus.QUEUED.value]:
-            raise HTTPException(status_code=409, detail="Project is currently processing or queued.")
-            
         if status in [ProjectStatus.READY_FOR_REVIEW.value, ProjectStatus.COMPLETED.value]:
             raise HTTPException(status_code=409, detail="Project is already completed or pending review.")
             
-    from app.services.orchestration_service import orchestration_service
+    # Atomic transition to QUEUED to claim the retry
+    if not orchestration_service.claim_state_transition(project_id, ProjectStatus.QUEUED.value, [ProjectStatus.FAILED.value]):
+        raise HTTPException(status_code=409, detail="Project is currently processing or already claimed by another request.")
+            
     try:
-        with get_db() as db:
-            db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.QUEUED.value, project_id))
-            db.commit()
         orchestration_service.trigger_pipeline(project_id)
         return {"status": "QUEUED", "message": "Project recovery triggered."}
     except Exception as e:
+        # Only revert if it is still QUEUED (executor rejected it synchronously)
         with get_db() as db:
-            db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, str(e), project_id))
+            cursor = db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ? AND status = ?", 
+                                (ProjectStatus.FAILED.value, str(e), project_id, ProjectStatus.QUEUED.value))
             db.commit()
         raise HTTPException(status_code=500, detail=str(e))
 

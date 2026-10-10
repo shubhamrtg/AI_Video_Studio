@@ -25,20 +25,32 @@ def test_migration_consistency_detection(monkeypatch, tmp_path):
 
     conn.close()
     
-    # Now test the auto-repair logic
+    # Now test the auto-repair logic with the specific required scenario
     os.remove(db_path)
     conn = sqlite3.connect(db_path)
     conn.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
     conn.execute("INSERT INTO schema_migrations (version) VALUES (4)")
     
-    # Fill in v1 and v2 and v3 columns, but miss v4 columns (sync_status, sync_error)
-    conn.execute("CREATE TABLE projects (id TEXT PRIMARY KEY, excel_id TEXT, video_idea TEXT, visual_style TEXT, language TEXT, voice_style TEXT, target_platform TEXT, priority TEXT, script_text TEXT, final_video_url TEXT, error TEXT, audio_policy TEXT)")
+    # Fill in v1 and v2 columns, but MISS v3 (audio_policy) AND v4 columns (sync_status, sync_error)
+    conn.execute("CREATE TABLE projects (id TEXT PRIMARY KEY, excel_id TEXT, video_idea TEXT, visual_style TEXT, language TEXT, voice_style TEXT, target_platform TEXT, priority TEXT, script_text TEXT, final_video_url TEXT, error TEXT)")
     conn.execute("CREATE TABLE shots (id TEXT PRIMARY KEY, audio_requirements TEXT, narration_text TEXT)")
     
-    run_migrations(conn) # Should auto-repair v4 columns
+    # Insert some data to ensure it survives
+    conn.execute("INSERT INTO projects (id, video_idea) VALUES ('P1', 'Test Idea')")
     
-    # Verify sync_status exists now
+    run_migrations(conn) # Should auto-repair v3 and v4 columns
+    
+    # Verify columns exist now
     project_columns = [row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()]
+    assert "audio_policy" in project_columns
     assert "sync_status" in project_columns
     assert "sync_error" in project_columns
+    
+    # Verify data survived
+    proj = conn.execute("SELECT * FROM projects WHERE id = 'P1'").fetchone()
+    assert proj is not None
+    
+    # Ensure idempotency
+    run_migrations(conn)
+    
     conn.close()

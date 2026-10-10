@@ -92,7 +92,20 @@ def test_full_e2e_workflow(test_client, monkeypatch):
     wb_read = openpyxl.load_workbook(temp_excel)
     ws_read = wb_read["VideoIdeas"]
     assert ws_read.cell(row=2, column=5).value == "READY_FOR_REVIEW"
-    assert ws_read.cell(row=2, column=7).value == proj["final_video_url"]
+    excel_url = ws_read.cell(row=2, column=7).value
+    assert excel_url == proj["final_video_url"]
+    
+    # Resolve the output reference using the application's real URL/path conversion function
+    from app.core.path_utils import public_url_to_local_path
+    excel_local_path = public_url_to_local_path(excel_url)
+    assert os.path.exists(excel_local_path)
+    assert os.path.getsize(excel_local_path) > 0
+    
+    # Run ffprobe on the resolved path
+    probe = subprocess.run([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", excel_local_path
+    ], check=True, capture_output=True, text=True)
+    assert float(probe.stdout.strip()) > 0
 
     # Now approve it
     response = test_client.post(f"/api/projects/{project_id}/approve")
@@ -178,3 +191,112 @@ def test_retry_recovery(test_client, monkeypatch):
     
     # DB state should be QUEUED before the thread starts executing
     # (assuming thread hasn't picked it up immediately or even if it did, it would be STORYBOARDING, but we mocked trigger_pipeline if we want)
+def test_concurrent_api_retries(test_client, monkeypatch):
+    import threading
+    import uuid
+    from app.db.database import get_db
+    from app.models.project import ProjectStatus
+    
+    project_id = str(uuid.uuid4())
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO projects (id, video_idea, target_duration, aspect_ratio, status) VALUES (?, ?, ?, ?, ?)",
+            (project_id, "Concurrency retry API test", 10, "16:9", ProjectStatus.FAILED.value)
+        )
+        db.commit()
+        
+    # We want to mock `trigger_pipeline` so we can simulate both hitting the API
+    from app.services.orchestration_service import orchestration_service
+    trigger_calls = [0]
+    
+    def mock_trigger(pid):
+        trigger_calls[0] += 1
+        
+    monkeypatch.setattr(orchestration_service, "trigger_pipeline", mock_trigger)
+    
+    # We want both threads to run the API simultaneously
+    responses = []
+    
+    def hit_retry_api():
+        resp = test_client.post(f"/api/projects/{project_id}/retry")
+        responses.append(resp.status_code)
+        
+    t1 = threading.Thread(target=hit_retry_api)
+    t2 = threading.Thread(target=hit_retry_api)
+    
+    t1.start()
+    t2.start()
+    
+    t1.join()
+    t2.join()
+    
+    assert responses.count(200) == 1
+    assert responses.count(409) == 1
+    assert trigger_calls[0] == 1
+    
+    with get_db() as db:
+        proj = db.execute("SELECT status FROM projects WHERE id = ?", (project_id,)).fetchone()
+        assert proj["status"] == ProjectStatus.QUEUED.value
+
+def test_executor_rejection(test_client, monkeypatch):
+    import uuid
+    from app.db.database import get_db
+    from app.models.project import ProjectStatus
+    
+    project_id = str(uuid.uuid4())
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO projects (id, video_idea, target_duration, aspect_ratio, status) VALUES (?, ?, ?, ?, ?)",
+            (project_id, "Rejection test", 10, "16:9", ProjectStatus.FAILED.value)
+        )
+        db.commit()
+        
+    from app.services.orchestration_service import orchestration_service
+    
+    # Force full queue
+    orchestration_service._active_and_queued_jobs = orchestration_service.max_queue
+    
+    resp = test_client.post(f"/api/projects/{project_id}/retry")
+    assert resp.status_code == 500
+    assert "Orchestration queue is at capacity" in resp.json()["detail"]
+    
+    # Project should be back to FAILED
+    with get_db() as db:
+        proj = db.execute("SELECT status FROM projects WHERE id = ?", (project_id,)).fetchone()
+        assert proj["status"] == ProjectStatus.FAILED.value
+        
+    # Reset queue, should work
+    orchestration_service._active_and_queued_jobs = 0
+    resp = test_client.post(f"/api/projects/{project_id}/retry")
+    assert resp.status_code == 200
+@pytest.mark.anyio
+async def test_startup_recovery_rejection(test_client, monkeypatch):
+    import uuid
+    from app.db.database import get_db
+    from app.models.project import ProjectStatus
+    from app.services.orchestration_service import orchestration_service
+    from app.main import lifespan
+    from fastapi import FastAPI
+    
+    project_id = str(uuid.uuid4())
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO projects (id, video_idea, target_duration, aspect_ratio, status) VALUES (?, ?, ?, ?, ?)",
+            (project_id, "Startup rejection test", 10, "16:9", ProjectStatus.QUEUED.value)
+        )
+        db.commit()
+        
+    # Force full queue so startup trigger_pipeline fails
+    orchestration_service._active_and_queued_jobs = orchestration_service.max_queue
+    
+    app = FastAPI()
+    async with lifespan(app):
+        pass # run startup
+        
+    # Check DB, should be FAILED now
+    with get_db() as db:
+        proj = db.execute("SELECT status FROM projects WHERE id = ?", (project_id,)).fetchone()
+        assert proj["status"] == ProjectStatus.FAILED.value
+        
+    # Reset queue
+    orchestration_service._active_and_queued_jobs = 0

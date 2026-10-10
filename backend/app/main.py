@@ -43,6 +43,9 @@ async def lifespan(app: FastAPI):
                     orchestration_service.trigger_pipeline(proj["id"])
                 except Exception as e:
                     print(f"Failed to trigger {proj['id']} on startup: {e}")
+                    db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ? AND status = ?", 
+                               (ProjectStatus.FAILED.value, f"Startup recovery failed: {str(e)}", proj["id"], ProjectStatus.QUEUED.value))
+                    db.commit()
             
     yield
 

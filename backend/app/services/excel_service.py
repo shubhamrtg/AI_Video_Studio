@@ -134,7 +134,8 @@ class ExcelService:
                 except RuntimeError as e:
                     logger.error(f"Failed to queue project {pid} from excel: {e}")
                     with get_db() as db:
-                        db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, str(e), pid))
+                        db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ? AND status = ?", 
+                                   (ProjectStatus.FAILED.value, str(e), pid, ProjectStatus.QUEUED.value))
                         db.commit()
 
     def update_excel_status(self, excel_id: str, status: str, output_path: str = None, error: str = None):
