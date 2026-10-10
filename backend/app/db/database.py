@@ -132,6 +132,21 @@ def run_migrations(conn):
         except Exception as e:
             conn.rollback()
             logger.error(f"Migration 3 failed: {e}")
+    if current_version < 4:
+        try:
+            logger.info("Applying migration 4: Add sync tracking")
+            cursor.execute("BEGIN TRANSACTION")
+            project_columns = [row[1] for row in cursor.execute("PRAGMA table_info(projects)").fetchall()]
+            if "sync_status" not in project_columns:
+                cursor.execute("ALTER TABLE projects ADD COLUMN sync_status TEXT DEFAULT 'PENDING'")
+            if "sync_error" not in project_columns:
+                cursor.execute("ALTER TABLE projects ADD COLUMN sync_error TEXT")
+            cursor.execute("INSERT INTO schema_migrations (version) VALUES (4)")
+            conn.commit()
+            current_version = 4
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Migration 4 failed: {e}")
             raise
 
 def init_db():

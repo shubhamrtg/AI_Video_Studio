@@ -64,7 +64,8 @@ The application orchestrates video projects through the following states:
 4. Put `QUEUED` in the status column.
 5. Call `POST /api/orchestration/ingest` (or click Ingest in the UI) to load them.
 6. Processing occurs in the background via a bounded `ThreadPoolExecutor` (Max 3 concurrent jobs).
-7. Final MP4 output paths and final statuses (`COMPLETED`, `FAILED`) are written directly back to the Excel file alongside the initial records.
+7. Videos transition through `READY_FOR_REVIEW` and once explicitly approved, they transition to `COMPLETED`.
+8. Final MP4 output paths and final statuses (`COMPLETED`, `FAILED`) are written directly back to the Excel file. Excel sync is decoupled from media pipeline, ensuring a media generation success is never discarded due to a locked spreadsheet.
 
 ## Audio Policy
 
@@ -77,7 +78,7 @@ The application strictly enforces an explicit audio policy:
 ## Output Locations
 
 Outputs are reliably deposited into the configured `DATA_DIR` directory:
-- Temporary assembly artifacts: `DATA_DIR/projects/<id>/final/temp_final.mp4`
+- Temporary assembly artifacts: `DATA_DIR/projects/<id>/final/temp_<uuid>_final.mp4`
 - Validated Final Videos: `DATA_DIR/projects/<id>/final/final.mp4`
 - Raw Generated Shots: `DATA_DIR/projects/<id>/shots/shotX.mp4`
 
@@ -94,11 +95,10 @@ The repository now uses `pytest` with a dedicated, deterministic automated test 
   ```
 
 * **Genuine Media Integration Tests:**
-  The suite includes `tests/test_media_integration.py` which synthetically generates exact 4-second `.mp4` chunks directly with local FFmpeg without consuming paid APIs, then assemblies and probes them to prove FFmpeg pipeline reliability.
+  The suite includes `tests/test_media_integration.py` which synthetically generates exact 4-second `.mp4` chunks directly with local FFmpeg without consuming paid APIs, then assemblies and probes them to prove FFmpeg pipeline reliability. Includes frequency analysis of synthetic signals to guarantee correct clip alignment and silence policies.
 
 ## Known Limitations
 
-- **State Recovery:** Background jobs are held in `ThreadPoolExecutor`. In the event of a sudden server crash, pending jobs that were in `GENERATING_VIDEO` or `STORYBOARDING` will remain in a stuck state in the Database. A full retry logic / recovery command is not yet fully implemented.
 - **Narration Provider:** The AI Script Generation (`SCRIPTING`) and Audio Speech (`GENERATING_AUDIO`) integrations are modeled but lack integrated backend provider wrappers in this release.
 - **Shot Chunk limits:** External provider bounds dictate shots must be strictly between 4.0 and 8.0 seconds.
 

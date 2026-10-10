@@ -4,7 +4,7 @@ import pytest
 from app.services.assembly_service import assembly_service
 from app.core.config import settings
 
-def test_genuine_media_assembly(tmp_path, monkeypatch):
+def test_genuine_media_assembly(monkeypatch):
     """
     Tests actual assembly using real ffmpeg, generating synthetic colored clips.
     """
@@ -14,9 +14,10 @@ def test_genuine_media_assembly(tmp_path, monkeypatch):
         pytest.skip("FFmpeg is not installed or not in PATH. Skipping genuine media test.")
         
     project_id = "proj-media-test"
-    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    from pathlib import Path
+    data_path = Path(settings.DATA_DIR)
     
-    shots_dir = tmp_path / "projects" / project_id / "shots"
+    shots_dir = data_path / "projects" / project_id / "shots"
     shots_dir.mkdir(parents=True, exist_ok=True)
     
     clip1 = shots_dir / "shot1.mp4"
@@ -45,7 +46,7 @@ def test_genuine_media_assembly(tmp_path, monkeypatch):
         output_filename="final_genuine.mp4"
     )
     
-    final_path = tmp_path / "projects" / project_id / "final" / "final_genuine.mp4"
+    final_path = data_path / "projects" / project_id / "final" / "final_genuine.mp4"
     assert final_path.exists()
     assert final_path.stat().st_size > 0
     
@@ -66,7 +67,7 @@ def test_genuine_media_assembly(tmp_path, monkeypatch):
     audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
     assert len(audio_streams) == 0
 
-def test_genuine_media_assembly_preserve_audio_multi(tmp_path, monkeypatch):
+def test_genuine_media_assembly_preserve_audio_multi(monkeypatch):
     """
     Tests assembly of multiple clips with audio_mode="preserve" where audio sync and continuity is verified.
     """
@@ -76,9 +77,10 @@ def test_genuine_media_assembly_preserve_audio_multi(tmp_path, monkeypatch):
         pytest.skip("FFmpeg is not installed or not in PATH. Skipping genuine media test.")
         
     project_id = "proj-media-test-audio-multi"
-    monkeypatch.setattr(settings, "DATA_DIR", str(tmp_path))
+    from pathlib import Path
+    data_path = Path(settings.DATA_DIR)
     
-    shots_dir = tmp_path / "projects" / project_id / "shots"
+    shots_dir = data_path / "projects" / project_id / "shots"
     shots_dir.mkdir(parents=True, exist_ok=True)
     
     clip1 = shots_dir / "shot1_audio.mp4"
@@ -118,7 +120,7 @@ def test_genuine_media_assembly_preserve_audio_multi(tmp_path, monkeypatch):
         output_filename="final_mixed_audio.mp4"
     )
     
-    final_path = tmp_path / "projects" / project_id / "final" / "final_mixed_audio.mp4"
+    final_path = data_path / "projects" / project_id / "final" / "final_mixed_audio.mp4"
     assert final_path.exists()
     
     probe_result = subprocess.run([
@@ -132,9 +134,50 @@ def test_genuine_media_assembly_preserve_audio_multi(tmp_path, monkeypatch):
     audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
     assert len(audio_streams) == 1, "Audio preserve mode must result in audio stream output"
     
-    # Extract audio to check frequencies (basic test to ensure the audio stream decoded properly)
-    audio_dump_path = str(tmp_path / "audio_dump.wav")
+    # Extract audio to check frequencies
+    audio_dump_path = str(data_path / "audio_dump.wav")
     subprocess.run([
-        "ffmpeg", "-y", "-i", str(final_path), "-vn", "-c:a", "pcm_s16le", audio_dump_path
+        "ffmpeg", "-y", "-i", str(final_path), "-vn", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "1", audio_dump_path
     ], check=True, capture_output=True)
     assert os.path.exists(audio_dump_path)
+    
+    import wave
+    import struct
+    
+    def get_frequency_and_amplitude(wav_file, start_sec, end_sec):
+        with wave.open(wav_file, 'r') as w:
+            framerate = w.getframerate()
+            w.setpos(int(start_sec * framerate))
+            frames_to_read = int((end_sec - start_sec) * framerate)
+            data = w.readframes(frames_to_read)
+            
+            unpacked = struct.unpack(f"<{frames_to_read}h", data)
+            
+            # calculate amplitude
+            max_amp = max(abs(s) for s in unpacked)
+            if max_amp < 100:
+                return 0, max_amp # Silent
+            
+            # calculate zero crossings for frequency estimation
+            crossings = 0
+            for i in range(1, len(unpacked)):
+                if (unpacked[i-1] <= 0 and unpacked[i] > 0) or (unpacked[i-1] >= 0 and unpacked[i] < 0):
+                    crossings += 1
+            
+            # crossings per second / 2 = frequency
+            estimated_freq = (crossings / 2.0) / (end_sec - start_sec)
+            return estimated_freq, max_amp
+            
+    # Check 0-2s window (should be 440Hz tone)
+    freq1, amp1 = get_frequency_and_amplitude(audio_dump_path, 1.0, 2.0)
+    assert 430 <= freq1 <= 450, f"Expected ~440Hz, got {freq1}Hz"
+    assert amp1 > 1000, "Expected loud tone"
+    
+    # Check 4-5s window (should be silence)
+    freq2, amp2 = get_frequency_and_amplitude(audio_dump_path, 4.0, 5.0)
+    assert amp2 < 100, f"Expected silence, got amplitude {amp2}"
+    
+    # Check 7-8s window (should be 880Hz tone)
+    freq3, amp3 = get_frequency_and_amplitude(audio_dump_path, 7.0, 7.9)
+    assert 860 <= freq3 <= 900, f"Expected ~880Hz, got {freq3}Hz"
+    assert amp3 > 1000, "Expected loud tone"

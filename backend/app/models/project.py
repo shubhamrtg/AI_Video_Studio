@@ -78,5 +78,7 @@ class ProjectResponse(BaseModel):
     script_text: Optional[str] = None
     final_video_url: Optional[str] = None
     error: Optional[str] = None
+    sync_status: Optional[str] = "PENDING"
+    sync_error: Optional[str] = None
     created_at: str
     shots: List[ShotResponse] = []

@@ -31,7 +31,8 @@ class AssemblyService:
         os.makedirs(project_dir, exist_ok=True)
         
         final_path = os.path.join(project_dir, output_filename)
-        temp_path = os.path.join(project_dir, f"temp_{output_filename}")
+        import uuid
+        temp_path = os.path.join(project_dir, f"temp_{uuid.uuid4().hex}_{output_filename}")
         
         # Verify inputs exist
         if not shot_paths:

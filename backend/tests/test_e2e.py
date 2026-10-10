@@ -7,13 +7,19 @@ import openpyxl
 from app.main import app
 from app.services.excel_service import excel_service
 
-def test_full_e2e_workflow(test_client, tmp_path, monkeypatch):
+def test_full_e2e_workflow(test_client, monkeypatch):
     import subprocess
     from app.services.orchestration_service import orchestration_service
+    from app.services.video_provider import video_provider
     from app.core.config import settings
     
+    try:
+        subprocess.run(["ffmpeg", "-version"], check=True, capture_output=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pytest.skip("FFmpeg is not installed or not in PATH. Skipping genuine E2E test.")
+    
     # 1. Setup mock excel
-    temp_excel = tmp_path / "video_ideas.xlsx"
+    temp_excel = os.path.join(settings.DATA_DIR, "video_ideas.xlsx")
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "VideoIdeas"
@@ -24,28 +30,29 @@ def test_full_e2e_workflow(test_client, tmp_path, monkeypatch):
     
     monkeypatch.setattr(settings, "EXCEL_WORKBOOK_PATH", str(temp_excel))
     
-    # Setup mock subprocess for ffmpeg/ffprobe
-    def mock_run(cmd, *args, **kwargs):
-        class MockResult:
-            stdout = '{"streams": [{"codec_type": "video", "width": 1920, "height": 1080}], "format": {"duration": "6.0"}}'
+    # Setup deterministic video provider that runs real ffmpeg
+    def mock_generate_video(project_id, shot_id, prompt, duration, aspect_ratio):
+        shots_dir = os.path.join(settings.DATA_DIR, "projects", project_id, "shots")
+        os.makedirs(shots_dir, exist_ok=True)
+        out_file = os.path.join(shots_dir, f"{shot_id}.mp4")
         
-        if cmd[0] == "ffmpeg" and "-version" in cmd:
-            return MockResult()
-        if cmd[0] == "ffmpeg" and "-y" in cmd:
-            out_file = cmd[-1]
-            with open(out_file, "w") as f:
-                f.write("mock video content")
-            return MockResult()
-        if cmd[0] == "ffprobe":
-            return MockResult()
-        raise ValueError(f"Unexpected command: {cmd}")
+        # Real ffmpeg call for a deterministic synthetic clip
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=blue:s=1920x1080:d={duration}", 
+            "-c:v", "libx264", out_file
+        ], check=True, capture_output=True)
         
-    monkeypatch.setattr(subprocess, "run", mock_run)
+        from app.db.database import get_db
+        from app.models.project import ShotStatus
+        with get_db() as db:
+            db.execute("UPDATE shots SET status = ?, video_url = ? WHERE id = ?", 
+                       (ShotStatus.COMPLETED.value, out_file, shot_id))
+            db.commit()
+            
+        return out_file
+        
+    monkeypatch.setattr(video_provider, "generate_video_sync", mock_generate_video)
 
-    # Ingest (triggers background thread usually, but here we can wait)
-    # To avoid background thread race conditions during test, we mock `trigger_pipeline`
-    # and just call `run_pipeline_sync` ourselves.
-    
     triggered_projects = []
     def mock_trigger(pid):
         triggered_projects.append(pid)
@@ -65,12 +72,27 @@ def test_full_e2e_workflow(test_client, tmp_path, monkeypatch):
     # Verify final status
     from app.db.database import get_db
     with get_db() as db:
-        proj = db.execute("SELECT status, final_video_url FROM projects WHERE id = ?", (project_id,)).fetchone()
-        assert proj["status"] == "COMPLETED"
+        proj = db.execute("SELECT status, final_video_url, sync_status FROM projects WHERE id = ?", (project_id,)).fetchone()
+        assert proj["status"] == "READY_FOR_REVIEW"
         assert proj["final_video_url"] is not None
         assert proj["final_video_url"].endswith(".mp4")
+        assert os.path.exists(proj["final_video_url"])
+        assert proj["sync_status"] == "SUCCESS"
     
     # Check excel writeback
+    wb_read = openpyxl.load_workbook(temp_excel)
+    ws_read = wb_read["VideoIdeas"]
+    assert ws_read.cell(row=2, column=5).value == "READY_FOR_REVIEW"
+
+    # Now approve it
+    response = test_client.post(f"/api/projects/{project_id}/approve")
+    assert response.status_code == 200
+    
+    # Check it's COMPLETED in DB and Excel
+    with get_db() as db:
+        proj = db.execute("SELECT status FROM projects WHERE id = ?", (project_id,)).fetchone()
+        assert proj["status"] == "COMPLETED"
+        
     wb_read = openpyxl.load_workbook(temp_excel)
     ws_read = wb_read["VideoIdeas"]
     assert ws_read.cell(row=2, column=5).value == "COMPLETED"

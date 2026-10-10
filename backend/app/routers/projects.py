@@ -87,6 +87,8 @@ def get_project(project_id: str):
             script_text=row["script_text"],
             final_video_url=row["final_video_url"],
             error=row["error"],
+            sync_status=row["sync_status"] if "sync_status" in row.keys() else "PENDING",
+            sync_error=row["sync_error"] if "sync_error" in row.keys() else None,
             created_at=row["created_at"],
             shots=shots
         )
@@ -99,7 +101,26 @@ def generate_shot(project_id: str, shot_id: str, background_tasks: BackgroundTas
             raise HTTPException(status_code=404, detail="Shot not found")
         project = db.execute("SELECT aspect_ratio FROM projects WHERE id = ?", (project_id,)).fetchone()
         
-        db.execute("UPDATE shots SET status = ? WHERE id = ?", (ShotStatus.QUEUED.value, shot_id))
+        # Atomic claim for manual shot generation
+        cursor = db.execute("""
+            UPDATE shots 
+            SET status = ? 
+            WHERE id = ? AND status IN (?, ?)
+        """, (ShotStatus.QUEUED.value, shot_id, ShotStatus.QUEUED.value, ShotStatus.FAILED.value))
+        
+        # Also allow generating if it was somehow left PENDING, but usually shots are QUEUED or FAILED
+        if cursor.rowcount == 0:
+            # Check if it was PENDING
+            cursor = db.execute("""
+                UPDATE shots 
+                SET status = ? 
+                WHERE id = ? AND status = ?
+            """, (ShotStatus.QUEUED.value, shot_id, ShotStatus.PENDING.value))
+            
+            if cursor.rowcount == 0:
+                # If it's already completed or currently generating
+                db.rollback()
+                raise HTTPException(status_code=409, detail="Shot is already generating or completed.")
         db.commit()
     
     prompt = f"Description: {shot['description']}. Action: {shot['action']}. Camera: {shot['camera']}. Style: {shot['style']}. Lighting: {shot['lighting']}."
@@ -124,8 +145,9 @@ def assemble_project(project_id: str):
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
-        db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.ASSEMBLING.value, project_id))
-        db.commit()
+        from app.services.orchestration_service import orchestration_service
+        if not orchestration_service.claim_state_transition(project_id, ProjectStatus.ASSEMBLING.value, [ProjectStatus.GENERATING_VIDEO.value, ProjectStatus.FAILED.value, ProjectStatus.STORYBOARDING.value, ProjectStatus.QUEUED.value]):
+            raise HTTPException(status_code=409, detail="Project is currently processing or already completed.")
 
         shots = db.execute("SELECT video_url, status FROM shots WHERE project_id = ? ORDER BY shot_number ASC", (project_id,)).fetchall()
         if not shots:
@@ -167,17 +189,17 @@ def assemble_project(project_id: str):
             db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.READY_FOR_REVIEW.value, project_id))
             db.commit()
             
-            db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.COMPLETED.value, project_id))
-            db.commit()
-            
+            # Sync READY_FOR_REVIEW
             if proj_full and proj_full["excel_id"]:
                 try:
-                    excel_service.update_excel_status(proj_full["excel_id"], "COMPLETED", final_url)
+                    excel_service.update_excel_status(proj_full["excel_id"], ProjectStatus.READY_FOR_REVIEW.value, final_url)
+                    db.execute("UPDATE projects SET sync_status = 'SUCCESS', sync_error = NULL WHERE id = ?", (project_id,))
+                    db.commit()
                 except Exception as sync_e:
-                    db.execute("UPDATE projects SET error = ? WHERE id = ?", (f"Sync failed: {sync_e}", project_id))
+                    db.execute("UPDATE projects SET sync_status = 'FAILED', sync_error = ? WHERE id = ?", (str(sync_e), project_id))
                     db.commit()
                 
-            return {"status": "COMPLETED", "final_video_url": final_url}
+            return {"status": ProjectStatus.READY_FOR_REVIEW.value, "final_video_url": final_url}
         except Exception as e:
             db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, str(e), project_id))
             db.commit()
@@ -187,7 +209,56 @@ def assemble_project(project_id: str):
                 from app.services.excel_service import excel_service
                 try:
                     excel_service.update_excel_status(proj_full["excel_id"], "FAILED", error=str(e))
-                except Exception:
-                    pass
+                    db.execute("UPDATE projects SET sync_status = 'SUCCESS', sync_error = NULL WHERE id = ?", (project_id,))
+                    db.commit()
+                except Exception as sync_e:
+                    db.execute("UPDATE projects SET sync_status = 'FAILED', sync_error = ? WHERE id = ?", (str(sync_e), project_id))
+                    db.commit()
                 
             raise HTTPException(status_code=500, detail="Assembly or validation failed.")
+
+@router.post("/{project_id}/approve")
+def approve_project(project_id: str):
+    from app.services.orchestration_service import orchestration_service
+    from app.services.excel_service import excel_service
+    
+    if not orchestration_service.claim_state_transition(project_id, ProjectStatus.COMPLETED.value, [ProjectStatus.READY_FOR_REVIEW.value]):
+        raise HTTPException(status_code=409, detail="Project is not READY_FOR_REVIEW")
+        
+    with get_db() as db:
+        project = db.execute("SELECT excel_id, final_video_url FROM projects WHERE id = ?", (project_id,)).fetchone()
+        
+        if project and project["excel_id"]:
+            try:
+                excel_service.update_excel_status(project["excel_id"], ProjectStatus.COMPLETED.value, project["final_video_url"])
+                db.execute("UPDATE projects SET sync_status = 'SUCCESS', sync_error = NULL WHERE id = ?", (project_id,))
+                db.commit()
+            except Exception as sync_e:
+                db.execute("UPDATE projects SET sync_status = 'FAILED', sync_error = ? WHERE id = ?", (str(sync_e), project_id))
+                db.commit()
+                
+    return {"status": "COMPLETED"}
+
+@router.post("/{project_id}/retry-sync")
+def retry_excel_sync(project_id: str):
+    from app.services.excel_service import excel_service
+    with get_db() as db:
+        project = db.execute("SELECT excel_id, status, final_video_url, error, sync_status FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+            
+        if not project["excel_id"]:
+            raise HTTPException(status_code=400, detail="Project has no Excel ID")
+            
+        if project["sync_status"] == "SUCCESS":
+            return {"status": "SUCCESS", "message": "Already synced"}
+            
+        try:
+            excel_service.update_excel_status(project["excel_id"], project["status"], project["final_video_url"], error=project["error"])
+            db.execute("UPDATE projects SET sync_status = 'SUCCESS', sync_error = NULL WHERE id = ?", (project_id,))
+            db.commit()
+            return {"status": "SUCCESS", "message": "Sync successful"}
+        except Exception as e:
+            db.execute("UPDATE projects SET sync_status = 'FAILED', sync_error = ? WHERE id = ?", (str(e), project_id))
+            db.commit()
+            raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")

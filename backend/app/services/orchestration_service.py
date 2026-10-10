@@ -23,6 +23,20 @@ class OrchestrationService:
         self._queue_lock = threading.Lock()
         self._active_and_queued_jobs = 0
 
+    def claim_state_transition(self, project_id: str, target_state: str, allowed_prior_states: list) -> bool:
+        """Atomically claim and transition a project to a target state."""
+        with get_db() as db:
+            placeholders = ",".join("?" * len(allowed_prior_states))
+            params = [target_state, project_id] + allowed_prior_states
+            cursor = db.execute(f"""
+                UPDATE projects 
+                SET status = ? 
+                WHERE id = ? AND status IN ({placeholders})
+            """, tuple(params))
+            
+            db.commit()
+            return cursor.rowcount > 0
+
     def trigger_pipeline(self, project_id: str):
         """Asynchronously start the pipeline. Rejects if queue is full."""
         with self._queue_lock:
@@ -51,20 +65,12 @@ class OrchestrationService:
         6. excel writeback
         """
         try:
+            # Atomic Claim
+            if not self.claim_state_transition(project_id, ProjectStatus.STORYBOARDING.value, [ProjectStatus.QUEUED.value, ProjectStatus.FAILED.value]):
+                logger.warning(f"Project {project_id} could not be claimed (already running, completed, or not found).")
+                return
+            
             with get_db() as db:
-                # Atomic Claim
-                # We claim it if it's QUEUED (or FAILED if we allow retries, but for safety let's just do QUEUED for now)
-                cursor = db.execute("""
-                    UPDATE projects 
-                    SET status = ? 
-                    WHERE id = ? AND status IN (?, ?)
-                """, (ProjectStatus.STORYBOARDING.value, project_id, ProjectStatus.QUEUED.value, ProjectStatus.FAILED.value))
-                
-                if cursor.rowcount == 0:
-                    logger.warning(f"Project {project_id} could not be claimed (already running, completed, or not found).")
-                    return
-                
-                db.commit()
                 project = db.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
                 
                 excel_id = project["excel_id"]
@@ -124,18 +130,17 @@ class OrchestrationService:
                 db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.READY_FOR_REVIEW.value, project_id))
                 db.commit()
             
-            # 6. Complete and Sync
-            with get_db() as db:
-                db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.COMPLETED.value, project_id))
-                db.commit()
-                
+            # Sync READY_FOR_REVIEW
             if excel_id:
                 try:
-                    excel_service.update_excel_status(excel_id, ProjectStatus.COMPLETED.value, final_url)
+                    excel_service.update_excel_status(excel_id, ProjectStatus.READY_FOR_REVIEW.value, final_url)
+                    with get_db() as db:
+                        db.execute("UPDATE projects SET sync_status = 'SUCCESS', sync_error = NULL WHERE id = ?", (project_id,))
+                        db.commit()
                 except Exception as sync_e:
                     logger.error(f"Media succeeded but Excel sync failed: {sync_e}")
                     with get_db() as db:
-                        db.execute("UPDATE projects SET error = ? WHERE id = ?", (f"Sync failed: {sync_e}", project_id))
+                        db.execute("UPDATE projects SET sync_status = 'FAILED', sync_error = ? WHERE id = ?", (str(sync_e), project_id))
                         db.commit()
                     # Do NOT fail the project since media generation succeeded.
 

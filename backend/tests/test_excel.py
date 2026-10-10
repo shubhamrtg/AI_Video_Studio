@@ -62,4 +62,42 @@ def test_excel_ingestion(test_client, monkeypatch):
     # Ensure our formula survived!
     assert ws_read2.cell(row=4, column=1).value == "=SUM(1,2)"
     
+    # Test sync failure due to non-existent file
+    monkeypatch.setattr(settings, "EXCEL_WORKBOOK_PATH", "doesnotexist.xlsx")
+    with pytest.raises(FileNotFoundError):
+        excel_service.update_excel_status("EX-01", "COMPLETED")
+    
+    # Restore filepath
+    monkeypatch.setattr(settings, "EXCEL_WORKBOOK_PATH", temp_excel)
+    
+    # Test sync failure due to missing sheet
+    wb_read2.active.title = "WrongSheet"
+    wb_read2.save(temp_excel)
+    with pytest.raises(RuntimeError, match="Worksheet VideoIdeas not found"):
+        excel_service.update_excel_status("EX-01", "COMPLETED")
+        
+    wb_read2.active.title = "VideoIdeas"
+    wb_read2.save(temp_excel)
+    
+    # Test API retry endpoint
+    # First set the project's sync_status to FAILED in DB
+    with get_db() as db:
+        pid = db.execute("SELECT id FROM projects WHERE excel_id = 'EX-01'").fetchone()["id"]
+        db.execute("UPDATE projects SET sync_status = 'FAILED' WHERE id = ?", (pid,))
+        db.commit()
+        
+    resp = test_client.post(f"/api/projects/{pid}/retry-sync")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "SUCCESS"
+    
+    # Verify DB updated
+    with get_db() as db:
+        sync_st = db.execute("SELECT sync_status FROM projects WHERE id = ?", (pid,)).fetchone()["sync_status"]
+        assert sync_st == "SUCCESS"
+    
+    # Test already synced
+    resp = test_client.post(f"/api/projects/{pid}/retry-sync")
+    assert resp.status_code == 200
+    assert resp.json()["message"] == "Already synced"
+    
     os.remove(temp_excel)

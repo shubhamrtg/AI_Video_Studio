@@ -141,20 +141,24 @@ class ExcelService:
         """Updates the status of a specific row in the Excel sheet."""
         with self._lock:
             if not os.path.exists(self.filepath):
-                return
+                raise FileNotFoundError(f"Workbook {self.filepath} not found.")
 
             try:
                 wb = openpyxl.load_workbook(self.filepath)
+                if self.sheet_name not in wb.sheetnames:
+                    raise ValueError(f"Worksheet {self.sheet_name} not found.")
                 ws = wb[self.sheet_name]
                 
                 headers = {cell.value: col_idx for col_idx, cell in enumerate(ws[1], 1) if cell.value}
                 
                 if "id" not in headers or "status" not in headers:
-                    return
+                    raise ValueError("Required columns 'id' and 'status' not found in worksheet.")
                     
+                row_found = False
                 for row_idx in range(2, ws.max_row + 1):
                     cell_id = str(ws.cell(row=row_idx, column=headers["id"]).value)
                     if cell_id == excel_id:
+                        row_found = True
                         ws.cell(row=row_idx, column=headers["status"]).value = status
                         
                         if output_path and "output_path" in headers:
@@ -166,19 +170,23 @@ class ExcelService:
                         if status == "COMPLETED" and "completed_at" in headers:
                             ws.cell(row=row_idx, column=headers["completed_at"]).value = datetime.now().isoformat()
                             
+                        temp_path = self.filepath + ".tmp"
                         try:
-                            temp_path = self.filepath + ".tmp"
                             wb.save(temp_path)
                             os.replace(temp_path, self.filepath)
-                        except PermissionError:
-                            logger.error("Could not save Excel. File is locked.")
+                        except Exception as save_err:
                             if os.path.exists(temp_path):
                                 try:
                                     os.remove(temp_path)
                                 except OSError:
                                     pass
+                            raise RuntimeError(f"Failed to save Excel file: {save_err}")
                         break
+                
+                if not row_found:
+                    raise ValueError(f"Excel ID {excel_id} not found in worksheet.")
             except Exception as e:
-                logger.error(f"Failed to update Excel status: {e}")
+                # Re-raise to ensure caller knows sync failed
+                raise RuntimeError(f"Excel sync failed: {str(e)}")
 
 excel_service = ExcelService()

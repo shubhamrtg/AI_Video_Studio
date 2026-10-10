@@ -16,8 +16,16 @@ def setup_test_env():
     yield
     settings.DATA_DIR = original_data_dir
     settings.MOCK_PROVIDER_ENABLED = original_mock
+    # Cleanup temp_dir if needed
+    import shutil
+    try:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    except:
+        pass
 
 @pytest.fixture
 def test_client():
+    from app.main import create_app
+    app = create_app()
     with TestClient(app) as client:
         yield client

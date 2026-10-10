@@ -78,7 +78,7 @@ def test_data_preservation_and_migrations(tmp_path):
     # 4. Check schema version
     with sqlite3.connect(db_path) as conn:
         version = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        assert version == 3
+        assert version == 4
 
 def test_foreign_key_enforcement(tmp_path, monkeypatch):
     from app.core.config import settings
