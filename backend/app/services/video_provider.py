@@ -10,6 +10,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def claim_shot_generation(shot_id: str) -> bool:
+    with get_db() as db:
+        cursor = db.execute(
+            "UPDATE shots SET status = ? WHERE id = ? AND status NOT IN (?, ?)",
+            (ShotStatus.GENERATING.value, shot_id, ShotStatus.GENERATING.value, ShotStatus.COMPLETED.value)
+        )
+        db.commit()
+        return cursor.rowcount > 0
+
 def update_shot_status(shot_id: str, status: ShotStatus, video_url: str = None, error: str = None):
     with get_db() as db:
         db.execute(
@@ -27,7 +36,8 @@ class GoogleVeoProvider:
 
     def generate_video_sync(self, project_id: str, shot_id: str, prompt: str, duration: int, aspect_ratio: str = "16:9") -> str:
         try:
-            update_shot_status(shot_id, ShotStatus.GENERATING)
+            if not claim_shot_generation(shot_id):
+                raise RuntimeError("Shot is already generating or completed.")
             
             logger.info(f"[{shot_id}] Calling Veo API with models.generate_videos...")
             import time
@@ -52,7 +62,8 @@ class GoogleVeoProvider:
                 except FileNotFoundError:
                     raise RuntimeError("FFmpeg is not installed or not in PATH, cannot generate synthetic media.")
                 
-                video_url = f"/projects/{project_id}/shots/{shot_id}.mp4"
+                from app.core.path_utils import local_path_to_public_url
+                video_url = local_path_to_public_url(local_path)
                 update_shot_status(shot_id, ShotStatus.COMPLETED, video_url=video_url)
                 return video_url
 
@@ -95,6 +106,7 @@ class GoogleVeoProvider:
             os.makedirs(project_dir, exist_ok=True)
             local_path = os.path.join(project_dir, f"{shot_id}.mp4")
             
+            from app.core.path_utils import local_path_to_public_url
             if video.video_bytes:
                 with open(local_path, "wb") as f:
                     f.write(video.video_bytes)
@@ -103,7 +115,7 @@ class GoogleVeoProvider:
             else:
                 raise RuntimeError("No video bytes or URI returned")
             
-            video_url = f"/projects/{project_id}/shots/{shot_id}.mp4"
+            video_url = local_path_to_public_url(local_path)
             update_shot_status(shot_id, ShotStatus.COMPLETED, video_url=video_url)
             return video_url
             

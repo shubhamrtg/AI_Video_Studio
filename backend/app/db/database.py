@@ -132,6 +132,8 @@ def run_migrations(conn):
         except Exception as e:
             conn.rollback()
             logger.error(f"Migration 3 failed: {e}")
+            raise
+
     if current_version < 4:
         try:
             logger.info("Applying migration 4: Add sync tracking")

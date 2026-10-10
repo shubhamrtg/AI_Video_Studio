@@ -175,6 +175,7 @@ class AssemblyService:
                 except OSError:
                     pass
             
-        return f"/projects/{project_id}/final/{output_filename}"
+        from app.core.path_utils import local_path_to_public_url
+        return local_path_to_public_url(final_path)
 
 assembly_service = AssemblyService()

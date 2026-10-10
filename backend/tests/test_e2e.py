@@ -44,12 +44,16 @@ def test_full_e2e_workflow(test_client, monkeypatch):
         
         from app.db.database import get_db
         from app.models.project import ShotStatus
+        from app.core.path_utils import local_path_to_public_url
+        
+        pub_url = local_path_to_public_url(out_file)
+        
         with get_db() as db:
             db.execute("UPDATE shots SET status = ?, video_url = ? WHERE id = ?", 
-                       (ShotStatus.COMPLETED.value, out_file, shot_id))
+                       (ShotStatus.COMPLETED.value, pub_url, shot_id))
             db.commit()
             
-        return out_file
+        return pub_url
         
     monkeypatch.setattr(video_provider, "generate_video_sync", mock_generate_video)
 
@@ -75,8 +79,13 @@ def test_full_e2e_workflow(test_client, monkeypatch):
         proj = db.execute("SELECT status, final_video_url, sync_status FROM projects WHERE id = ?", (project_id,)).fetchone()
         assert proj["status"] == "READY_FOR_REVIEW"
         assert proj["final_video_url"] is not None
+        assert proj["final_video_url"].startswith("/projects/")
         assert proj["final_video_url"].endswith(".mp4")
-        assert os.path.exists(proj["final_video_url"])
+        
+        from app.core.path_utils import public_url_to_local_path
+        local_final = public_url_to_local_path(proj["final_video_url"])
+        assert os.path.exists(local_final)
+        
         assert proj["sync_status"] == "SUCCESS"
     
     # Check excel writeback
@@ -133,8 +142,8 @@ def test_atomic_claim_concurrency(test_client, monkeypatch):
     # Mock video_provider and assembly_service to avoid real FFmpeg
     from app.services.video_provider import video_provider
     from app.services.assembly_service import assembly_service
-    monkeypatch.setattr(video_provider, "generate_video_sync", lambda *args, **kwargs: "/mock.mp4")
-    monkeypatch.setattr(assembly_service, "assemble_shots", lambda *args, **kwargs: "/final.mp4")
+    monkeypatch.setattr(video_provider, "generate_video_sync", lambda *args, **kwargs: "/projects/mock/shots/mock.mp4")
+    monkeypatch.setattr(assembly_service, "assemble_shots", lambda *args, **kwargs: "/projects/mock/final/mock.mp4")
 
     # Run 5 threads trying to execute the pipeline for the same project
     threads = []

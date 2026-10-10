@@ -33,6 +33,17 @@ async def lifespan(app: FastAPI):
         if cursor.rowcount > 0:
             print(f"Crash recovery: Marked {cursor.rowcount} interrupted projects as FAILED.")
             
+        # Recover eligible QUEUED jobs
+        queued_projects = db.execute("SELECT id FROM projects WHERE status = ?", (ProjectStatus.QUEUED.value,)).fetchall()
+        if queued_projects:
+            print(f"Startup recovery: Resuming {len(queued_projects)} QUEUED projects.")
+            from app.services.orchestration_service import orchestration_service
+            for proj in queued_projects:
+                try:
+                    orchestration_service.trigger_pipeline(proj["id"])
+                except Exception as e:
+                    print(f"Failed to trigger {proj['id']} on startup: {e}")
+            
     yield
 
 def create_app() -> FastAPI:

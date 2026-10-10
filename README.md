@@ -71,7 +71,7 @@ The application orchestrates video projects through the following states:
 
 The application strictly enforces an explicit audio policy:
 - **`silent` (Default):** The generated video is forced to have no audio streams. If clips possess audio, they are dropped during FFmpeg assembly.
-- **`preserve`:** The generated video preserves the audio of the source clips. A strict validation will fail the job if a source clip lacks audio when `preserve` mode is activated.
+- **`preserve`:** The generated video preserves the audio of the source clips. If a source clip lacks an audio stream, a silent audio track of the exact clip duration is automatically generated and inserted to maintain audio-video timeline sync during concatenation.
 
 *Note: AI Narration and Music Mixing are not yet fully implemented.*
 

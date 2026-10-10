@@ -146,8 +146,8 @@ def assemble_project(project_id: str):
             raise HTTPException(status_code=404, detail="Project not found")
 
         from app.services.orchestration_service import orchestration_service
-        if not orchestration_service.claim_state_transition(project_id, ProjectStatus.ASSEMBLING.value, [ProjectStatus.GENERATING_VIDEO.value, ProjectStatus.FAILED.value, ProjectStatus.STORYBOARDING.value, ProjectStatus.QUEUED.value]):
-            raise HTTPException(status_code=409, detail="Project is currently processing or already completed.")
+        if not orchestration_service.claim_state_transition(project_id, ProjectStatus.ASSEMBLING.value, [ProjectStatus.FAILED.value, ProjectStatus.QUEUED.value]):
+            raise HTTPException(status_code=409, detail="Project is actively processing or already completed.")
 
         shots = db.execute("SELECT video_url, status FROM shots WHERE project_id = ? ORDER BY shot_number ASC", (project_id,)).fetchall()
         if not shots:
@@ -162,13 +162,18 @@ def assemble_project(project_id: str):
                 db.commit()
                 raise HTTPException(status_code=400, detail="All shots must be COMPLETED before assembly")
             
-            # Use safe local path parsing
-            filename = shot["video_url"].split("/")[-1]
-            local_path = os.path.join(settings.DATA_DIR, "projects", project_id, "shots", filename)
-            if not os.path.exists(local_path):
-                db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, f"Missing shot file {filename}", project_id))
+            from app.core.path_utils import public_url_to_local_path
+            try:
+                local_path = public_url_to_local_path(shot["video_url"])
+            except ValueError as ve:
+                db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, f"Invalid shot URL: {ve}", project_id))
                 db.commit()
-                raise HTTPException(status_code=500, detail=f"Missing shot file: {filename}")
+                raise HTTPException(status_code=500, detail=f"Invalid shot URL: {ve}")
+                
+            if not os.path.exists(local_path):
+                db.execute("UPDATE projects SET status = ?, error = ? WHERE id = ?", (ProjectStatus.FAILED.value, f"Missing shot file {local_path}", project_id))
+                db.commit()
+                raise HTTPException(status_code=500, detail=f"Missing shot file: {local_path}")
             shot_paths.append(local_path)
             
         from app.services.assembly_service import assembly_service

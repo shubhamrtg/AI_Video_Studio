@@ -44,7 +44,12 @@ class OrchestrationService:
                 raise RuntimeError(f"Orchestration queue is at capacity ({self.max_queue}). Try again later.")
             self._active_and_queued_jobs += 1
             
-        self.executor.submit(self._run_pipeline_wrapper, project_id)
+        try:
+            self.executor.submit(self._run_pipeline_wrapper, project_id)
+        except Exception:
+            with self._queue_lock:
+                self._active_and_queued_jobs -= 1
+            raise
         
     def _run_pipeline_wrapper(self, project_id: str):
         """Wraps the actual pipeline to ensure capacity is released."""
@@ -98,15 +103,14 @@ class OrchestrationService:
                 db.execute("UPDATE projects SET status = ? WHERE id = ?", (ProjectStatus.GENERATING_VIDEO.value, project_id))
                 db.commit()
                 
-            # 3. Generating Shots (sync sequentially for the bounds of this background task, but we could use threads. We'll do it sequentially in this worker to preserve API bounds).
+            # 3. Generating Shots
             shot_paths = []
             for shot in shots:
                 shot_id = f"{project_id}_s{shot.shot_number}"
-                # Generate synchronously within this background worker to maintain job control
                 video_url = video_provider.generate_video_sync(project_id, shot_id, shot.description, shot.duration, aspect)
                 
-                filename = video_url.split("/")[-1]
-                local_path = os.path.join(settings.DATA_DIR, "projects", project_id, "shots", filename)
+                from app.core.path_utils import public_url_to_local_path
+                local_path = public_url_to_local_path(video_url)
                 shot_paths.append(local_path)
                 
             # 4. Assemble
@@ -152,6 +156,14 @@ class OrchestrationService:
                 project = db.execute("SELECT excel_id FROM projects WHERE id = ?", (project_id,)).fetchone()
                 
             if project and project["excel_id"]:
-                excel_service.update_excel_status(project["excel_id"], ProjectStatus.FAILED.value, error=str(e))
+                try:
+                    excel_service.update_excel_status(project["excel_id"], ProjectStatus.FAILED.value, error=str(e))
+                    with get_db() as db:
+                        db.execute("UPDATE projects SET sync_status = 'SUCCESS', sync_error = NULL WHERE id = ?", (project_id,))
+                        db.commit()
+                except Exception as sync_e:
+                    with get_db() as db:
+                        db.execute("UPDATE projects SET sync_status = 'FAILED', sync_error = ? WHERE id = ?", (str(sync_e), project_id))
+                        db.commit()
 
 orchestration_service = OrchestrationService()
